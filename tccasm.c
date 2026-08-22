@@ -1311,6 +1311,25 @@ static void parse_asm_operands(ASMOperand *operands, int *nb_operands_ptr,
                     gv(RC_INT);
                 }
             }
+            /* An array-typed operand reached through a pointer (e.g. a
+               struct member array accessed via p->field) has already
+               decayed to a plain pointer value held in a register, so
+               unlike other lvalues it has VT_LVAL cleared (see the
+               '.'/'->' handling in tccgen.c). Restore VT_LVAL here so
+               that this operand is treated the same way as any other
+               memory reference: save_reg_upstack() then knows to keep
+               it as a spillable address (VT_LLOCAL) if register
+               pressure forces it out, rather than turning the spill
+               slot's own address into the operand's address. Without
+               this, a "=m"/"m" operand on such an expression ends up
+               addressing the spill slot instead of the intended
+               object. Constants (e.g. string literals, which are also
+               VT_ARRAY without VT_LVAL) are left alone: they are never
+               spilled and 'i'/'e' constraints require VT_LVAL to stay
+               clear on them. */
+            if ((vtop->type.t & VT_ARRAY) && !(vtop->r & VT_LVAL) &&
+                (vtop->r & VT_VALMASK) < VT_CONST)
+                vtop->r |= VT_LVAL;
             op->vt = vtop;
             skip(')');
             if (tok == ',') {
