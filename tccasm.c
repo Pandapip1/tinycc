@@ -1326,9 +1326,18 @@ static void parse_asm_operands(ASMOperand *operands, int *nb_operands_ptr,
                object. Constants (e.g. string literals, which are also
                VT_ARRAY without VT_LVAL) are left alone: they are never
                spilled and 'i'/'e' constraints require VT_LVAL to stay
-               clear on them. */
+               clear on them.
+
+               Only for a memory-only constraint, though. With 'r' the
+               operand is the decayed pointer *value* and must stay an
+               rvalue: marking it VT_LVAL makes gv() load through it, so
+               e.g. `asm("fnstenv (%0)" : : "r"(env))` on a char env[28]
+               passes the first bytes of env instead of its address.
+               'rm' is left alone too, since the register alternative may
+               still be chosen. */
             if ((vtop->type.t & VT_ARRAY) && !(vtop->r & VT_LVAL) &&
-                (vtop->r & VT_VALMASK) < VT_CONST)
+                (vtop->r & VT_VALMASK) < VT_CONST &&
+                strchr(op->constraint, 'm') && !strchr(op->constraint, 'r'))
                 vtop->r |= VT_LVAL;
             op->vt = vtop;
             skip(')');
