@@ -261,6 +261,18 @@ typedef struct _IMAGE_IMPORT_DESCRIPTOR {
     DWORD FirstThunk;
 } IMAGE_IMPORT_DESCRIPTOR;
 
+/* modern (RVA-based) delay-load import descriptor, PE/COFF spec 4.3 */
+typedef struct _IMAGE_DELAYLOAD_DESCRIPTOR {
+    DWORD Attributes;                    /* bit 0: RvaBased */
+    DWORD DllNameRVA;
+    DWORD ModuleHandleRVA;
+    DWORD ImportAddressTableRVA;
+    DWORD ImportNameTableRVA;
+    DWORD BoundImportAddressTableRVA;
+    DWORD UnloadInformationTableRVA;
+    DWORD TimeDateStamp;
+} IMAGE_DELAYLOAD_DESCRIPTOR;
+
 typedef struct _IMAGE_BASE_RELOCATION {
     DWORD   VirtualAddress;
     DWORD   SizeOfBlock;
@@ -412,6 +424,8 @@ struct pe_info {
     DWORD imp_size;
     DWORD iat_offs;
     DWORD iat_size;
+    DWORD delay_offs;
+    DWORD delay_size;
     DWORD exp_offs;
     DWORD exp_size;
     DWORD tls_dir;
@@ -767,6 +781,10 @@ static int pe_write(struct pe_info *pe)
             pe_set_datadir(&pe_header, IMAGE_DIRECTORY_ENTRY_IAT,
                 pe->iat_offs, pe->iat_size);
         }
+        if (pe->delay_size) {
+            pe_set_datadir(&pe_header, IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT,
+                pe->delay_offs, pe->delay_size);
+        }
         if (pe->exp_size) {
             pe_set_datadir(&pe_header, IMAGE_DIRECTORY_ENTRY_EXPORT,
                 pe->exp_offs, pe->exp_size);
@@ -1006,6 +1024,226 @@ static void pe_build_imports(struct pe_info *pe)
         dll_ptr += sizeof(IMAGE_IMPORT_DESCRIPTOR);
     }
 }
+
+/* ------------------------------------------------------------- */
+#if defined(TCC_TARGET_X86_64) || defined(TCC_TARGET_I386)
+
+/* Emit the per-DLL "tail merge" stub that every per-function delay-load
+   thunk of that DLL jumps into.  It preserves the registers a call may
+   be passing arguments in, calls __delayLoadHelper2(desc, ppfnIATEntry)
+   -- with 'ppfnIATEntry' (the address of the delay import address-table
+   slot the caller's thunk is for) having been placed in RAX/EAX by the
+   thunk -- restores the registers, and jumps to the address the helper
+   returned.  This is the same split MSVC and lld-link generate for
+   /DELAYLOAD (see PE/COFF spec 4.3 and lld/COFF/DLL.cpp), except that
+   __delayLoadHelper2 here uses the plain (non-decorated) C calling
+   convention on i386 too, instead of MSVC's __stdcall there: the
+   tail-merge stub cleans the two arguments off the stack itself. */
+static int pe_emit_delay_tailmerge(struct pe_info *pe, int desc_sym, int helper_sym)
+{
+    TCCState *s1 = pe->s1;
+    int off = text_section->data_offset;
+    unsigned char *p;
+
+#if defined(TCC_TARGET_X86_64)
+    static const unsigned char code[] = {
+        0x48, 0x89, 0x4C, 0x24, 0x08,       /* mov [rsp+8],  rcx */
+        0x48, 0x89, 0x54, 0x24, 0x10,       /* mov [rsp+10], rdx */
+        0x4C, 0x89, 0x44, 0x24, 0x18,       /* mov [rsp+18], r8  */
+        0x4C, 0x89, 0x4C, 0x24, 0x20,       /* mov [rsp+20], r9  */
+        0x48, 0x83, 0xEC, 0x68,             /* sub rsp, 0x68 */
+        0x66, 0x0F, 0x7F, 0x44, 0x24, 0x20, /* movdqa [rsp+20], xmm0 */
+        0x66, 0x0F, 0x7F, 0x4C, 0x24, 0x30, /* movdqa [rsp+30], xmm1 */
+        0x66, 0x0F, 0x7F, 0x54, 0x24, 0x40, /* movdqa [rsp+40], xmm2 */
+        0x66, 0x0F, 0x7F, 0x5C, 0x24, 0x50, /* movdqa [rsp+50], xmm3 */
+        0x48, 0x8B, 0xD0,                   /* mov rdx, rax (ppfnIATEntry) */
+        0x48, 0x8D, 0x0D, 0, 0, 0, 0,       /* lea rcx, [rip+desc] */
+        0xE8, 0, 0, 0, 0,                   /* call __delayLoadHelper2 */
+        0x66, 0x0F, 0x6F, 0x44, 0x24, 0x20, /* movdqa xmm0, [rsp+20] */
+        0x66, 0x0F, 0x6F, 0x4C, 0x24, 0x30, /* movdqa xmm1, [rsp+30] */
+        0x66, 0x0F, 0x6F, 0x54, 0x24, 0x40, /* movdqa xmm2, [rsp+40] */
+        0x66, 0x0F, 0x6F, 0x5C, 0x24, 0x50, /* movdqa xmm3, [rsp+50] */
+        0x48, 0x8B, 0x4C, 0x24, 0x70,       /* mov rcx, [rsp+70] */
+        0x48, 0x8B, 0x54, 0x24, 0x78,       /* mov rdx, [rsp+78] */
+        0x4C, 0x8B, 0x84, 0x24, 0x80, 0, 0, 0, /* mov r8, [rsp+80] */
+        0x4C, 0x8B, 0x8C, 0x24, 0x88, 0, 0, 0, /* mov r9, [rsp+88] */
+        0x48, 0x83, 0xC4, 0x68,             /* add rsp, 0x68 */
+        0xFF, 0xE0,                         /* jmp rax */
+    };
+    p = section_ptr_add(text_section, sizeof code);
+    memcpy(p, code, sizeof code);
+    /* lea rcx, [rip+disp] -> descriptor; disp field at offset 54 */
+    write32le(p + 54, (DWORD)-4);
+    put_elf_reloc(symtab_section, text_section, off + 54, R_XXX_THUNKFIX, desc_sym);
+    /* call __delayLoadHelper2; disp field at offset 59 */
+    write32le(p + 59, (DWORD)-4);
+    put_elf_reloc(symtab_section, text_section, off + 59, R_XXX_FUNCCALL, helper_sym);
+#else /* TCC_TARGET_I386, cdecl variant of MSVC's tailMergeX86 */
+    static const unsigned char code[] = {
+        0x51,             /* push ecx */
+        0x52,             /* push edx */
+        0x50,             /* push eax (ppfnIATEntry) */
+        0x68, 0, 0, 0, 0, /* push offset descriptor */
+        0xE8, 0, 0, 0, 0, /* call __delayLoadHelper2 */
+        0x83, 0xC4, 0x08, /* add esp, 8 (cdecl: caller cleans up) */
+        0x5A,             /* pop edx */
+        0x59,             /* pop ecx */
+        0xFF, 0xE0,       /* jmp eax */
+    };
+    p = section_ptr_add(text_section, sizeof code);
+    memcpy(p, code, sizeof code);
+    /* push offset descriptor: absolute VA, needs a base relocation */
+    put_elf_reloc(symtab_section, text_section, off + 4, R_XXX_THUNKFIX, desc_sym);
+    /* call __delayLoadHelper2 */
+    write32le(p + 9, (DWORD)-4);
+    put_elf_reloc(symtab_section, text_section, off + 9, R_XXX_FUNCCALL, helper_sym);
+#endif
+    return off;
+}
+
+/* Emit the per-function delay-load thunk at the space reserved earlier
+   in pe_check_symbols(): it loads the address of this function's delay
+   import address-table slot and jumps to the shared tail-merge stub. */
+static void pe_emit_delay_thunk(struct pe_info *pe, int thk_off, int slot_sym, int tm_off)
+{
+    TCCState *s1 = pe->s1;
+    unsigned char *p = text_section->data + thk_off;
+
+#if defined(TCC_TARGET_X86_64)
+    p[0] = 0x48, p[1] = 0x8D, p[2] = 0x05; /* lea rax, [rip+disp] */
+    write32le(p + 3, (DWORD)-4);
+    put_elf_reloc(symtab_section, text_section, thk_off + 3, R_XXX_THUNKFIX, slot_sym);
+    p[7] = 0xE9; /* jmp rel32 */
+    write32le(p + 8, tm_off - (thk_off + 12));
+#else /* TCC_TARGET_I386 */
+    p[0] = 0xB8; /* mov eax, imm32 */
+    put_elf_reloc(symtab_section, text_section, thk_off + 1, R_XXX_THUNKFIX, slot_sym);
+    p[5] = 0xE9; /* jmp rel32 */
+    write32le(p + 6, tm_off - (thk_off + 10));
+#endif
+}
+
+/* -Wl,--delay-all : build delay-load import descriptors (data
+   directory 13) for every imported DLL instead of ordinary ones, and
+   the machine-code thunks that make delay loading actually work.  See
+   pe_build_imports() above for the parallel, much simpler, ordinary
+   case. */
+static void pe_build_delay_imports(struct pe_info *pe)
+{
+    int i, k, n, sym_cnt, ndlls;
+    DWORD rva_base = pe->thunk->sh_addr - pe->imagebase;
+    TCCState *s1 = pe->s1;
+    int helper_sym, dir_off;
+
+    ndlls = pe->imp_count;
+    for (sym_cnt = i = 0; i < ndlls; ++i)
+        sym_cnt += pe->imp_info[i]->sym_count;
+    if (0 == sym_cnt)
+        return;
+
+    helper_sym = find_elf_sym(symtab_section, "__delayLoadHelper2");
+    if (!helper_sym)
+        helper_sym = put_elf_sym(symtab_section, 0, 0,
+            ELFW(ST_INFO)(STB_GLOBAL, STT_FUNC), 0, SHN_UNDEF,
+            "__delayLoadHelper2");
+
+    pe_align_section(pe->thunk, 16);
+    pe_align_section(data_section, PTR_SIZE);
+
+    dir_off = pe->thunk->data_offset;
+    section_ptr_add(pe->thunk, (ndlls + 1) * sizeof(IMAGE_DELAYLOAD_DESCRIPTOR));
+    pe->delay_offs = dir_off + rva_base;
+    pe->delay_size = (ndlls + 1) * sizeof(IMAGE_DELAYLOAD_DESCRIPTOR);
+    /* the whole array, including the null terminator entry, starts zeroed */
+
+    for (i = 0; i < ndlls; ++i) {
+        struct pe_import_info *p = pe->imp_info[i];
+        int dllindex = p->dll_index;
+        const char *name = dllindex
+            ? tcc_basename(s1->loaded_dlls[dllindex-1]->name) : "";
+        DWORD name_rva, nt_rva;
+        int mh_off, mh_sym, at_off, at_sym, nt_off;
+        int tm_off, desc_sym;
+        IMAGE_DELAYLOAD_DESCRIPTOR *d;
+        DWORD desc_off = dir_off + i * sizeof(IMAGE_DELAYLOAD_DESCRIPTOR);
+
+        name_rva = put_elf_str(pe->thunk, name) + rva_base;
+
+        /* per-DLL module handle cache: one writable zeroed pointer slot */
+        pe_align_section(data_section, PTR_SIZE);
+        mh_off = data_section->data_offset;
+        section_ptr_add(data_section, PTR_SIZE);
+        mh_sym = put_elf_sym(symtab_section, mh_off, PTR_SIZE,
+            ELFW(ST_INFO)(STB_LOCAL, STT_OBJECT), 0, data_section->sh_num, NULL);
+
+        /* delay import address table: sym_count slots + null terminator,
+           writable (the helper patches these after first resolving) */
+        at_off = data_section->data_offset;
+        section_ptr_add(data_section, (p->sym_count + 1) * PTR_SIZE);
+        at_sym = put_elf_sym(symtab_section, at_off, 0,
+            ELFW(ST_INFO)(STB_LOCAL, STT_OBJECT), 0, data_section->sh_num, NULL);
+
+        /* delay import name table: sym_count RVAs + null terminator */
+        nt_off = pe->thunk->data_offset;
+        nt_rva = nt_off + rva_base;
+        section_ptr_add(pe->thunk, (p->sym_count + 1) * sizeof(DWORD));
+
+        desc_sym = put_elf_sym(symtab_section, desc_off,
+            sizeof(IMAGE_DELAYLOAD_DESCRIPTOR),
+            ELFW(ST_INFO)(STB_LOCAL, STT_OBJECT), 0, pe->thunk->sh_num, NULL);
+
+        d = (IMAGE_DELAYLOAD_DESCRIPTOR*)(pe->thunk->data + desc_off);
+        d->Attributes = 1; /* RvaBased */
+        d->DllNameRVA = name_rva;
+        d->ImportNameTableRVA = nt_rva;
+        /* ModuleHandleRVA / ImportAddressTableRVA point into data_section,
+           whose final address isn't known yet: fill them in via a
+           relocation instead of computing the RVA by hand */
+        put_elf_reloc(symtab_section, pe->thunk,
+            desc_off + offsetof(IMAGE_DELAYLOAD_DESCRIPTOR, ModuleHandleRVA),
+            R_XXX_RELATIVE, mh_sym);
+        put_elf_reloc(symtab_section, pe->thunk,
+            desc_off + offsetof(IMAGE_DELAYLOAD_DESCRIPTOR, ImportAddressTableRVA),
+            R_XXX_RELATIVE, at_sym);
+
+        tm_off = pe_emit_delay_tailmerge(pe, desc_sym, helper_sym);
+
+        for (k = 0, n = p->sym_count; k < n; ++k) {
+            struct import_symbol *isym = p->symbols[k];
+            int slot_off = at_off + k * PTR_SIZE;
+            int slot_sym, thunk_sym;
+            ElfW(Sym) *imp_sym = (ElfW(Sym)*)s1->dynsymtab_section->data + isym->sym_index;
+            const char *fname = (char*)s1->dynsymtab_section->link->data + imp_sym->st_name;
+            DWORD hint_rva = pe->thunk->data_offset + rva_base;
+
+            section_ptr_add(pe->thunk, sizeof(WORD)); /* hint, not used */
+            put_elf_str(pe->thunk, fname);
+            *(DWORD*)(pe->thunk->data + nt_off + k * sizeof(DWORD)) = hint_rva;
+
+            slot_sym = put_elf_sym(symtab_section, slot_off, PTR_SIZE,
+                ELFW(ST_INFO)(STB_LOCAL, STT_OBJECT), 0, data_section->sh_num, NULL);
+            thunk_sym = put_elf_sym(symtab_section, isym->thk_offset, 0,
+                ELFW(ST_INFO)(STB_LOCAL, STT_FUNC), 0, text_section->sh_num, NULL);
+
+            /* the address-table slot initially holds the VA of this
+               function's thunk (the helper overwrites it with the real
+               function's VA on first call); it's an absolute pointer,
+               so it needs a base relocation */
+            put_elf_reloc(symtab_section, data_section, slot_off,
+                REL_TYPE_DIRECT, thunk_sym);
+
+            pe_emit_delay_thunk(pe, isym->thk_offset, slot_sym, tm_off);
+        }
+        /* the address/name table null terminators are already zero */
+    }
+}
+
+#else /* unsupported target: keep the flag harmless rather than a link error */
+static void pe_build_delay_imports(struct pe_info *pe)
+{
+    tcc_error_noabort("--delay-all is only supported for the i386 and x86_64 targets");
+}
+#endif
 
 /* ------------------------------------------------------------- */
 
@@ -1309,7 +1547,10 @@ static int pe_assign_addresses (struct pe_info *pe)
             pe->thunk = s;
 
         if (s == pe->thunk) {
-            pe_build_imports(pe);
+            if (pe->s1->pe_all_delay)
+                pe_build_delay_imports(pe);
+            else
+                pe_build_imports(pe);
             pe_build_exports(pe);
             if (pe->tls_size)
                 pe_build_tls(pe, NULL);
@@ -1450,6 +1691,24 @@ static int pe_check_symbols(struct pe_info *pe)
                 unsigned offset = is->thk_offset;
                 if (offset) {
                     /* got aliased symbol, like stricmp and _stricmp */
+                } else if (s1->pe_all_delay) {
+                    /* Reserve room for a delay-load stub (a per-function
+                       thunk that loads the address of its delay-import
+                       address-table slot and jumps to a shared per-DLL
+                       tail-merge stub).  The actual code and relocations
+                       are filled in later by pe_build_delay_imports(),
+                       once the tail-merge stub and the delay import
+                       tables have been laid out. */
+                    offset = text_section->data_offset;
+                    is->thk_offset = offset;
+#if defined(TCC_TARGET_X86_64)
+                    section_ptr_add(text_section, 7 + 5);
+#elif defined(TCC_TARGET_I386)
+                    section_ptr_add(text_section, 5 + 5);
+#else
+                    tcc_error_noabort(
+                        "--delay-all is only supported for the i386 and x86_64 targets");
+#endif
                 } else {
                     unsigned char *p;
 
@@ -1499,6 +1758,9 @@ static int pe_check_symbols(struct pe_info *pe)
             } else { /* STT_OBJECT */
                 if (0 == _imp_)
                     ret = tcc_error_noabort("symbol '%s' is missing __declspec(dllimport)", name);
+                if (s1->pe_all_delay)
+                    ret = tcc_error_noabort(
+                        "--delay-all: delay-loading data symbol '%s' is not supported", name);
                 /* original symbol will be patched later in pe_build_imports */
                 sym->st_value = is->iat_index; /* chain potential alias */
                 is->iat_index = sym_index;
