@@ -1491,6 +1491,8 @@ static int tcc_set_linker(TCCState *s, const char *optarg)
 #ifdef TCC_TARGET_PE
         } else if (link_option(&o, "large-address-aware")) {
             s->pe_characteristics |= 0x20;
+        } else if (link_option(&o, "delay-all")) {
+            s->pe_all_delay = 1;
         } else if (!!(r = link_option(&o, "?dynamicbase"))) {
             SET_OR_CLEAR_2(s1->pe_dll_characteristics, 0x40, 0x60);
         } else if (!!(r = link_option(&o, "?high-entropy-va"))) {

@@ -949,6 +949,7 @@ struct TCCState {
     unsigned pe_file_align;
     unsigned pe_stack_size;
     addr_t pe_imagebase;
+    int pe_all_delay; /* -Wl,--delay-all : delay-load every imported DLL */
 # if defined(TCC_TARGET_X86_64) || defined(TCC_TARGET_ARM64)
     Section *uw_pdata;
     int uw_sym;
