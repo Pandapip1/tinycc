@@ -97,6 +97,17 @@
 # define PE_IMAGE_REL IMAGE_REL_BASED_HIGHLOW
 #endif
 
+/* -Wl,--delay-all : size in bytes of the per-DLL "tail merge" stub
+   emitted by pe_emit_delay_tailmerge(); must be reserved in
+   text_section up front (see struct pe_import_info::delay_tm_offset) */
+#if defined(TCC_TARGET_X86_64)
+# define DELAY_TAILMERGE_SIZE 119
+#elif defined(TCC_TARGET_I386)
+# define DELAY_TAILMERGE_SIZE 20
+#else
+# define DELAY_TAILMERGE_SIZE 0 /* --delay-all unsupported; see pe_build_delay_imports() */
+#endif
+
 #ifndef IMAGE_NT_SIGNATURE
 /* cross compiler: windows.h was not included */
 /* ----------------------------------------------------------- */
@@ -406,6 +417,12 @@ struct pe_import_info {
     int dll_index;
     int sym_count;
     struct import_symbol **symbols;
+    /* --delay-all only: offset in text_section of this DLL's shared
+       "tail merge" stub, reserved up front (like import_symbol's own
+       thk_offset) because text_section's size is fixed by the time
+       pe_build_delay_imports() runs -- appending to text_section that
+       late would land past the section's already-computed extent */
+    int delay_tm_offset;
 };
 
 struct pe_info {
@@ -438,6 +455,11 @@ struct pe_info {
     int sec_count;
     struct pe_import_info **imp_info;
     int imp_count;
+    /* function symbols delay-loaded because of --delay-all; kept apart
+       from imp_info so that pe_build_imports() (ordinary imports, e.g.
+       data symbols that --delay-all can't delay-load) is untouched */
+    struct pe_import_info **delay_imp_info;
+    int delay_imp_count;
     /* output */
     FILE *op;
     DWORD sum;
@@ -917,6 +939,45 @@ found_dll:
     return s;
 }
 
+/* same as pe_add_import(), but groups into pe->delay_imp_info instead:
+   used for --delay-all's function imports, kept apart from ordinary
+   (e.g. data) imports of the same DLL */
+static struct import_symbol *pe_add_delay_import(struct pe_info *pe, int sym_index)
+{
+    TCCState *s1 = pe->s1;
+    int i;
+    int dll_index;
+    struct pe_import_info *p;
+    struct import_symbol *s;
+    ElfW(Sym) *isym;
+
+    isym = (ElfW(Sym) *)pe->s1->dynsymtab_section->data + sym_index;
+    dll_index = isym->st_size;
+
+    i = dynarray_assoc ((void**)pe->delay_imp_info, pe->delay_imp_count, dll_index);
+    if (-1 != i) {
+        p = pe->delay_imp_info[i];
+        goto found_dll;
+    }
+    p = tcc_mallocz(sizeof *p);
+    p->dll_index = dll_index;
+    dynarray_add(&pe->delay_imp_info, &pe->delay_imp_count, p);
+    /* reserve this DLL's tail-merge stub now, while text_section's
+       size is still open (see struct pe_import_info::delay_tm_offset) */
+    p->delay_tm_offset = text_section->data_offset;
+    section_ptr_add(text_section, DELAY_TAILMERGE_SIZE);
+
+found_dll:
+    i = dynarray_assoc ((void**)p->symbols, p->sym_count, sym_index);
+    if (-1 != i)
+        return p->symbols[i];
+
+    s = tcc_mallocz(sizeof *s);
+    dynarray_add(&p->symbols, &p->sym_count, s);
+    s->sym_index = sym_index;
+    return s;
+}
+
 static void pe_free_imports(struct pe_info *pe)
 {
     int i;
@@ -925,6 +986,11 @@ static void pe_free_imports(struct pe_info *pe)
         dynarray_reset(&p->symbols, &p->sym_count);
     }
     dynarray_reset(&pe->imp_info, &pe->imp_count);
+    for (i = 0; i < pe->delay_imp_count; ++i) {
+        struct pe_import_info *p = pe->delay_imp_info[i];
+        dynarray_reset(&p->symbols, &p->sym_count);
+    }
+    dynarray_reset(&pe->delay_imp_info, &pe->delay_imp_count);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -1039,10 +1105,9 @@ static void pe_build_imports(struct pe_info *pe)
    __delayLoadHelper2 here uses the plain (non-decorated) C calling
    convention on i386 too, instead of MSVC's __stdcall there: the
    tail-merge stub cleans the two arguments off the stack itself. */
-static int pe_emit_delay_tailmerge(struct pe_info *pe, int desc_sym, int helper_sym)
+static int pe_emit_delay_tailmerge(struct pe_info *pe, int off, int desc_sym, int helper_sym)
 {
     TCCState *s1 = pe->s1;
-    int off = text_section->data_offset;
     unsigned char *p;
 
 #if defined(TCC_TARGET_X86_64)
@@ -1070,7 +1135,7 @@ static int pe_emit_delay_tailmerge(struct pe_info *pe, int desc_sym, int helper_
         0x48, 0x83, 0xC4, 0x68,             /* add rsp, 0x68 */
         0xFF, 0xE0,                         /* jmp rax */
     };
-    p = section_ptr_add(text_section, sizeof code);
+    p = text_section->data + off;
     memcpy(p, code, sizeof code);
     /* lea rcx, [rip+disp] -> descriptor; disp field at offset 54 */
     write32le(p + 54, (DWORD)-4);
@@ -1090,7 +1155,7 @@ static int pe_emit_delay_tailmerge(struct pe_info *pe, int desc_sym, int helper_
         0x59,             /* pop ecx */
         0xFF, 0xE0,       /* jmp eax */
     };
-    p = section_ptr_add(text_section, sizeof code);
+    p = text_section->data + off;
     memcpy(p, code, sizeof code);
     /* push offset descriptor: absolute VA, needs a base relocation */
     put_elf_reloc(symtab_section, text_section, off + 4, R_XXX_THUNKFIX, desc_sym);
@@ -1135,9 +1200,9 @@ static void pe_build_delay_imports(struct pe_info *pe)
     TCCState *s1 = pe->s1;
     int helper_sym, dir_off;
 
-    ndlls = pe->imp_count;
+    ndlls = pe->delay_imp_count;
     for (sym_cnt = i = 0; i < ndlls; ++i)
-        sym_cnt += pe->imp_info[i]->sym_count;
+        sym_cnt += pe->delay_imp_info[i]->sym_count;
     if (0 == sym_cnt)
         return;
 
@@ -1157,7 +1222,7 @@ static void pe_build_delay_imports(struct pe_info *pe)
     /* the whole array, including the null terminator entry, starts zeroed */
 
     for (i = 0; i < ndlls; ++i) {
-        struct pe_import_info *p = pe->imp_info[i];
+        struct pe_import_info *p = pe->delay_imp_info[i];
         int dllindex = p->dll_index;
         const char *name = dllindex
             ? tcc_basename(s1->loaded_dlls[dllindex-1]->name) : "";
@@ -1206,7 +1271,7 @@ static void pe_build_delay_imports(struct pe_info *pe)
             desc_off + offsetof(IMAGE_DELAYLOAD_DESCRIPTOR, ImportAddressTableRVA),
             R_XXX_RELATIVE, at_sym);
 
-        tm_off = pe_emit_delay_tailmerge(pe, desc_sym, helper_sym);
+        tm_off = pe_emit_delay_tailmerge(pe, p->delay_tm_offset, desc_sym, helper_sym);
 
         for (k = 0, n = p->sym_count; k < n; ++k) {
             struct import_symbol *isym = p->symbols[k];
@@ -1548,10 +1613,11 @@ static int pe_assign_addresses (struct pe_info *pe)
             pe->thunk = s;
 
         if (s == pe->thunk) {
-            if (pe->s1->pe_all_delay)
-                pe_build_delay_imports(pe);
-            else
-                pe_build_imports(pe);
+            /* ordinary imports (always; e.g. data symbols that
+               --delay-all can't delay-load) and delay imports (only
+               those pe_check_symbols routed to delay_imp_info) */
+            pe_build_imports(pe);
+            pe_build_delay_imports(pe);
             pe_build_exports(pe);
             if (pe->tls_size)
                 pe_build_tls(pe, NULL);
@@ -1684,7 +1750,11 @@ static int pe_check_symbols(struct pe_info *pe)
             if (0 == imp_sym)
                 continue; /* will throw the 'undefined' error in relocate_syms() */
 
-            is = pe_add_import(pe, imp_sym);
+            if (s1->pe_all_delay
+                && (type == STT_FUNC || (type == STT_NOTYPE && 0 == _imp_)))
+                is = pe_add_delay_import(pe, imp_sym);
+            else
+                is = pe_add_import(pe, imp_sym);
 
             if (type == STT_FUNC
                 /* symbols from assembler often have no type */
@@ -1759,10 +1829,10 @@ static int pe_check_symbols(struct pe_info *pe)
             } else { /* STT_OBJECT */
                 if (0 == _imp_)
                     ret = tcc_error_noabort("symbol '%s' is missing __declspec(dllimport)", name);
-                if (s1->pe_all_delay)
-                    ret = tcc_error_noabort(
-                        "--delay-all: delay-loading data symbol '%s' is not supported", name);
-                /* original symbol will be patched later in pe_build_imports */
+                /* data symbols can't be delay-loaded transparently (the
+                   address would need re-fetching on every access), so
+                   they stay ordinary imports even under --delay-all;
+                   original symbol will be patched later in pe_build_imports */
                 sym->st_value = is->iat_index; /* chain potential alias */
                 is->iat_index = sym_index;
             }
