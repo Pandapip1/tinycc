@@ -1241,6 +1241,7 @@ static void pe_build_delay_imports(struct pe_info *pe)
 #else /* unsupported target: keep the flag harmless rather than a link error */
 static void pe_build_delay_imports(struct pe_info *pe)
 {
+    TCCState *s1 = pe->s1;
     tcc_error_noabort("--delay-all is only supported for the i386 and x86_64 targets");
 }
 #endif
