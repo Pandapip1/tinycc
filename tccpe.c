@@ -845,6 +845,11 @@ static int pe_write(struct pe_info *pe)
     pe_header.opthdr.SizeOfHeaders = pe->sizeofheaders;
     pe_header.opthdr.SectionAlignment = pe->section_align;
     pe_header.opthdr.FileAlignment = pe->file_align;
+    /* only warn when the user asked for this alignment; tcc's own native
+       default is unmeasured (see pe_set_options()) */
+    if (s1->section_align && pe->section_align < 0x1000)
+        tcc_warning("section alignment 0x%x is below the page size;"
+            " modern Windows will not load this image", pe->section_align);
     pe_header.opthdr.ImageBase = pe->imagebase;
     pe_header.opthdr.Subsystem = pe->subsystem;
     pe_header.opthdr.DllCharacteristics = s1->pe_dll_characteristics;
@@ -2561,6 +2566,9 @@ static void pe_set_options(TCCState * s1, struct pe_info *pe)
 
     /* set default file/section alignment */
     if (pe->subsystem == 1) {
+        /* unmeasured: whether a native image at 0x20 maps through the
+           kernel path that actually loads native images. CreateProcess
+           rejects it, but rejects well-formed native images too. */
         pe->section_align = 0x20;
         pe->file_align = 0x20;
     } else {
