@@ -1,0 +1,4 @@
+out_m: a[0]=1234 tail=9999
+in_m: 5678
+r_local: address
+r_member: address
