@@ -843,6 +843,8 @@ static int pe_write(struct pe_info *pe)
     pe_header.filehdr.NumberOfSections = pe->sec_count;
     pe_header.opthdr.AddressOfEntryPoint = pe->start_addr;
     pe_header.opthdr.SizeOfHeaders = pe->sizeofheaders;
+    pe_header.opthdr.SectionAlignment = pe->section_align;
+    pe_header.opthdr.FileAlignment = pe->file_align;
     pe_header.opthdr.ImageBase = pe->imagebase;
     pe_header.opthdr.Subsystem = pe->subsystem;
     pe_header.opthdr.DllCharacteristics = s1->pe_dll_characteristics;
