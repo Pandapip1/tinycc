@@ -70,7 +70,60 @@ if ! grep 'unsupported PE-COFF relocation type 7' "$OUT/bad.log" >/dev/null; the
 fi
 echo " . rejected an unsupported relocation type, loudly"
 
-# 4. finally, check the relocations actually computed the right values
+# 4. malformed headers must be rejected loudly, and never crash or be
+#    silently accepted.  The objects are generated, not committed: they differ
+#    from a well-formed one only in a single header field.
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$SRC/pe-coff-gen.py" "$OUT"
+
+    # 4a. a symbol count that cannot fit in the file (it also overflows the
+    #     int index arithmetic used to walk the table) - used to SIGSEGV
+    if "$TCC" $TCCFLAGS -r -o "$OUT/bad1.o" "$OUT/nsyms-overflow.o" \
+            >"$OUT/bad1.log" 2>&1; then
+        echo "error: an object declaring 119400000 symbols in 86 bytes loaded"
+        exit 1
+    fi
+    if ! grep 'symbol table of 119400000 entries' "$OUT/bad1.log" >/dev/null; then
+        echo "error: the bad symbol count was not reported as such:"
+        sed 's/^/   | /' "$OUT/bad1.log"
+        exit 1
+    fi
+    echo " . rejected an out-of-range symbol count"
+
+    # 4b. the same object with a sane NRELOC_OVFL count must still load, and
+    #     keep its one relocation
+    "$TCC" $TCCFLAGS -r -o "$OUT/ovfl-ok.o" "$OUT/nreloc-ok.o"
+    if command -v readelf >/dev/null 2>&1; then
+        # tcc writes ELF for -o objects, so the relocation is visible here
+        if ! readelf -r "$OUT/ovfl-ok.o" | grep '_tgt' >/dev/null; then
+            echo "error: the relocation of an NRELOC_OVFL section was dropped"
+            readelf -r "$OUT/ovfl-ok.o" | sed 's/^/   | /'
+            exit 1
+        fi
+    fi
+    echo " . loaded an IMAGE_SCN_LNK_NRELOC_OVFL section, relocation intact"
+
+    # 4c. ... and with a count of 0x80000002 - one byte different - it must
+    #     fail.  Truncating that count to a negative int made the relocation
+    #     loop never run: tcc exited 0 having dropped every relocation, which
+    #     is the silently-wrong output this reader exists to prevent.
+    if "$TCC" $TCCFLAGS -r -o "$OUT/ovfl-bad.o" "$OUT/nreloc-ovfl.o" \
+            >"$OUT/bad2.log" 2>&1; then
+        echo "error: an object declaring 2147483649 relocations in 128 bytes"
+        echo "       loaded successfully - relocations were silently dropped"
+        exit 1
+    fi
+    if ! grep '2147483649 relocations' "$OUT/bad2.log" >/dev/null; then
+        echo "error: the bad relocation count was not reported as such:"
+        sed 's/^/   | /' "$OUT/bad2.log"
+        exit 1
+    fi
+    echo " . rejected an out-of-range relocation count"
+else
+    echo " . skipped the malformed-header checks: no python3"
+fi
+
+# 5. finally, check the relocations actually computed the right values
 RUN=
 CANRUN=yes
 if [ "$OS" = "Windows_NT" ]; then
@@ -102,7 +155,7 @@ run_and_check() {
 run_and_check "$OUT/pe-coff.exe" "$SRC/pe-coff-test.expect" &&
     [ "$CANRUN" = no ] || echo " . relocations resolved to the expected values"
 
-# 5. the same, for x86-64.  There is no x86_64-w64-mingw32-as on most Linux
+# 6. the same, for x86-64.  There is no x86_64-w64-mingw32-as on most Linux
 #    boxes, so this leans on clang's integrated assembler when it can target
 #    windows-gnu, and is skipped when neither is available.
 X64AS=

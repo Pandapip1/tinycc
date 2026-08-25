@@ -2491,11 +2491,20 @@ static const char *coff_name(unsigned char *field, char *buf,
    Returns the ELF type, or -1 if the type is not handled - the caller then
    errors out, loudly, naming the numeric type.
    *pfsize gets the size in bytes of the field being patched (0 for no-ops).
-   PTR is the fixup site, or NULL when the section has no contents.
+   PTR is the fixup site, or NULL when the section has no contents, and AVAIL
+   is how many bytes of the section follow it.  Returns -2 when the field does
+   not fit in AVAIL: the addend lives in the section contents ([PECOFF] 5.3),
+   so the fit has to be established *before* the field is read, not after -
+   a relocation at r_vaddr == SizeOfRawData would otherwise read up to 8 bytes
+   past the section's contribution.
    On a RELA target *paddend receives the addend lifted out of the contents;
    on a REL target *pbias receives the amount to add to the stored value in
    place.  Exactly one of the two mechanisms is ever used, per target. */
+#define COFF_RELOC_FIELD(n) \
+    do { *pfsize = (n); if ((unsigned long)(n) > avail) return -2; } while (0)
+
 static int coff_reloc_type(int coff_type, unsigned char *ptr,
+                           unsigned long avail,
                            addr_t *paddend, int *pbias, int *pfsize)
 {
     *paddend = 0;
@@ -2518,7 +2527,7 @@ static int coff_reloc_type(int coff_type, unsigned char *ptr,
            addend stored in the field.  Identical to ELF R_386_32 (S + A), so
            no bias.  Verified empirically: gas stores the same bytes for
            pe-i386 dir32 and elf32-i386 R_386_32. */
-        *pfsize = 4;
+        COFF_RELOC_FIELD(4);
         return R_386_32;
     case 0x0014:
         /* IMAGE_REL_I386_REL32 (= R_PCRLONG, objdump "DISP32"): 32-bit
@@ -2527,7 +2536,7 @@ static int coff_reloc_type(int coff_type, unsigned char *ptr,
            the field, so the ELF addend is 4 less than what COFF stores.
            [BFD] bfd/coff-i386.c coff_i386_rtype_to_howto: "*addendp -= 4"
            under COFF_WITH_PE. */
-        *pfsize = 4;
+        COFF_RELOC_FIELD(4);
         *pbias = -4;
         return R_386_PC32;
     }
@@ -2556,14 +2565,14 @@ static int coff_reloc_type(int coff_type, unsigned char *ptr,
     case 1:
         /* IMAGE_REL_AMD64_ADDR64 (= R_AMD64_DIR64): 64-bit VA, not
            PC-relative, 8-byte field.  ELF R_X86_64_64 (S + A). */
-        *pfsize = 8;
+        COFF_RELOC_FIELD(8);
         *paddend = (addr_t)read64le(ptr);
         return R_X86_64_64;
     case 2:
         /* IMAGE_REL_AMD64_ADDR32 (= R_AMD64_DIR32): 32-bit VA, 4-byte field.
            The [BFD] howto complains on *bitfield* overflow (unsigned), which
            matches ELF R_X86_64_32, not the sign-extending R_X86_64_32S. */
-        *pfsize = 4;
+        COFF_RELOC_FIELD(4);
         *paddend = (addr_t)read32le(ptr);
         return R_X86_64_32;
     case 4: /* IMAGE_REL_AMD64_REL32   (= R_AMD64_PCRLONG)   */
@@ -2578,7 +2587,7 @@ static int coff_reloc_type(int coff_type, unsigned char *ptr,
            -4-N.  [BFD] bfd/coff-x86_64.c coff_amd64_rtype_to_howto:
            "*addendp -= (bfd_vma)(rel->r_type - R_AMD64_PCRLONG)" followed by
            "*addendp -= 4". */
-        *pfsize = 4;
+        COFF_RELOC_FIELD(4);
         *paddend = (addr_t)(int64_t)((int)read32le(ptr) - 4 - (coff_type - 4));
         return R_X86_64_PC32;
     case 14:
@@ -2586,7 +2595,7 @@ static int coff_reloc_type(int coff_type, unsigned char *ptr,
            [BFD] bfd/coff-x86_64.c howto table - 64-bit PC-relative, 8-byte
            field, bias -8 ("if (rel->r_type == R_AMD64_PCRQUAD) *addendp -=
            8" in coff_amd64_rtype_to_howto). */
-        *pfsize = 8;
+        COFF_RELOC_FIELD(8);
         *paddend = (addr_t)(read64le(ptr) - 8);
         return R_X86_64_PC64;
     }
@@ -2598,9 +2607,28 @@ static int coff_reloc_type(int coff_type, unsigned char *ptr,
 #else
     /* Other PE targets (arm-wince, arm64-win32) use different relocation
        numbering, which this reader does not implement; every type errors. */
-    (void)ptr;
+    (void)ptr, (void)avail;
 #endif
     return -1;
+}
+#undef COFF_RELOC_FIELD
+
+/* Does the byte range [OFF, OFF+SIZE) lie inside a file of FILE_SIZE bytes?
+   Every count and offset below comes straight out of the file, so each one is
+   checked against the file's real length before it is used.  That is the check
+   that matters, and it is deliberately made once, up front, per range:
+     - load_data() (tccelf.c) allocates whatever size it is handed and ignores
+       the short read, so an unchecked size means either a wild allocation or
+       header fields parsed out of uninitialised heap;
+     - a count that cannot fit in the file is invalid whatever the arithmetic
+       width, so bounding it here is also what keeps "count * entry_size" and
+       "index * entry_size" from overflowing further down.
+   All arithmetic here is done in unsigned long long, which is wider than the
+   32-bit fields these values are read from, so it cannot itself wrap. */
+static int coff_in_file(unsigned long long off, unsigned long long size,
+                        unsigned long long file_size)
+{
+    return off <= file_size && size <= file_size - off;
 }
 
 ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
@@ -2609,6 +2637,7 @@ ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
     unsigned char *shdrs = NULL, *symtab = NULL, *relocs = NULL;
     char *strtab = NULL;
     unsigned long strtab_size = 0, symptr, size;
+    unsigned long long file_size, shdr_off, strtab_off;
     int nsec = 0, nsyms = 0, i, j, ret = -1;
     CoffSection *sec = NULL;
     int *old_to_new = NULL;
@@ -2620,6 +2649,8 @@ ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
         return tcc_error_noabort("PE-COFF object file for machine 0x%04x, expected 0x%04x",
             (unsigned)read16le(fh + FH_MACHINE), (unsigned)IMAGE_FILE_MACHINE);
 
+    file_size = (unsigned long long)lseek(fd, 0, SEEK_END);
+
     nsec = read16le(fh + FH_NSCNS);
     nsyms = read32le(fh + FH_NSYMS);
     symptr = read32le(fh + FH_SYMPTR);
@@ -2628,8 +2659,12 @@ ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
     if (nsyms < 0)
         return tcc_error_noabort("PE-COFF object file has a bad symbol count");
 
-    shdrs = load_data(fd, file_offset + COFF_FILHSZ + read16le(fh + FH_OPTHDR),
-                      (unsigned long)nsec * COFF_SCNHSZ);
+    shdr_off = (unsigned long long)file_offset + COFF_FILHSZ
+               + read16le(fh + FH_OPTHDR);
+    if (!coff_in_file(shdr_off, (unsigned long long)nsec * COFF_SCNHSZ, file_size))
+        return tcc_error_noabort("PE-COFF object file: section table for %d"
+                                 " sections is past the end of the file", nsec);
+    shdrs = load_data(fd, shdr_off, (unsigned long)nsec * COFF_SCNHSZ);
     sec = tcc_mallocz(sizeof(CoffSection) * (nsec + 1));
     for (i = 1; i <= nsec; i++) {
         sec[i].hdr = shdrs + (i - 1) * COFF_SCNHSZ;
@@ -2640,23 +2675,38 @@ ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
         nsyms = 0;      /* no symbol table: nothing to resolve against */
     if (nsyms) {
         unsigned char sz[4];
+        /* NumberOfSymbols is a 32-bit field; nothing but the file's own size
+           bounds it, and every walk below indexes the table with an int, so
+           a count of, say, 0x08000000 would make "i * COFF_SYMESZ" overflow
+           and the pointer wrap ~2GB backwards. */
+        if (!coff_in_file((unsigned long long)file_offset + symptr,
+                          (unsigned long long)nsyms * COFF_SYMESZ, file_size)) {
+            tcc_error_noabort("PE-COFF object file: symbol table of %d entries"
+                              " is past the end of the file", nsyms);
+            goto the_end;
+        }
         symtab = load_data(fd, file_offset + symptr,
                            (unsigned long)nsyms * COFF_SYMESZ);
         /* the string table follows the symbol table and begins with its own
            total size in bytes ([PECOFF] 5.6) */
-        if (read_mem(fd, file_offset + symptr + nsyms * COFF_SYMESZ, sz, 4)
-            && read32le(sz) >= 4) {
+        strtab_off = (unsigned long long)file_offset + symptr
+                     + (unsigned long long)nsyms * COFF_SYMESZ;
+        if (read_mem(fd, strtab_off, sz, 4) && read32le(sz) >= 4) {
             strtab_size = read32le(sz);
-            strtab = load_data(fd, file_offset + symptr + nsyms * COFF_SYMESZ,
-                               strtab_size);
+            if (!coff_in_file(strtab_off, strtab_size, file_size)) {
+                tcc_error_noabort("PE-COFF object file: string table of %lu bytes"
+                                  " is past the end of the file", strtab_size);
+                goto the_end;
+            }
+            strtab = load_data(fd, strtab_off, strtab_size);
             strtab[strtab_size - 1] = 0;  /* a corrupt table cannot run off */
         }
     }
-    old_to_new = tcc_mallocz((nsyms + 1) * sizeof(int));
+    old_to_new = tcc_mallocz(((size_t)nsyms + 1) * sizeof(int));
 
     /* --- pass 1: locate section symbols and COMDAT selections ---------- */
     for (i = 0; i < nsyms; ) {
-        unsigned char *sy = symtab + i * COFF_SYMESZ;
+        unsigned char *sy = symtab + (size_t)i * COFF_SYMESZ;
         int numaux = sy[SY_NUMAUX];
         int scnum = (int16_t)read16le(sy + SY_SCNUM);
         if (sy[SY_SCLASS] == COFF_C_STAT && numaux >= 1 && i + numaux < nsyms
@@ -2709,8 +2759,8 @@ ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
                For SAME_SIZE and EXACT_MATCH that differs from a real linker
                only in the diagnostics it would emit, not in what gets
                linked. */
-            for (j = 0; j < nsyms; j += 1 + symtab[j * COFF_SYMESZ + SY_NUMAUX]) {
-                unsigned char *sy = symtab + j * COFF_SYMESZ;
+            for (j = 0; j < nsyms; j += 1 + symtab[(size_t)j * COFF_SYMESZ + SY_NUMAUX]) {
+                unsigned char *sy = symtab + (size_t)j * COFF_SYMESZ;
                 if (sy[SY_SCLASS] == COFF_C_EXT
                     && (int16_t)read16le(sy + SY_SCNUM) == i) {
                     key = coff_name(sy + SY_NAME, nbuf2, strtab, strtab_size, 0);
@@ -2734,7 +2784,7 @@ ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
                               " no section symbol", i);
             goto the_end;
         }
-        assoc = read16le(symtab + (sec[i].sym + 1) * COFF_SYMESZ + AUX_SCN_ASSOC);
+        assoc = read16le(symtab + ((size_t)sec[i].sym + 1) * COFF_SYMESZ + AUX_SCN_ASSOC);
         if (assoc < 1 || assoc > nsec || sec[assoc].comdat == COFF_COMDAT_ASSOCIATIVE) {
             tcc_error_noabort("PE-COFF object: associative COMDAT section %d refers"
                               " to bad section %d", i, assoc);
@@ -2808,7 +2858,7 @@ ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
 
     /* --- pass 5: symbols ---------------------------------------------- */
     for (i = 0; i < nsyms; ) {
-        unsigned char *sy = symtab + i * COFF_SYMESZ;
+        unsigned char *sy = symtab + (size_t)i * COFF_SYMESZ;
         int si = i, numaux = sy[SY_NUMAUX];
         int sclass = sy[SY_SCLASS];
         int scnum = (int16_t)read16le(sy + SY_SCNUM);
@@ -2884,7 +2934,7 @@ ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
 
     /* --- pass 6: relocations ------------------------------------------ */
     for (i = 1; i <= nsec; i++) {
-        unsigned long nrel, relptr, vaddr, rawsize;
+        unsigned long nrel, relptr, vaddr, rawsize, r;
         unsigned flags;
         const char *name;
         Section *s = sec[i].s;
@@ -2913,9 +2963,23 @@ ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
             nrel = read32le(ovfl + RE_VADDR) - 1;
             relptr += COFF_RELSZ;
         }
+        /* The overflow count is a full 32-bit field, so it can be far larger
+           than the file.  It must never be silently truncated: iterating it as
+           an int would make a count >= 0x80000000 negative, the loop body would
+           never run, and tcc would exit successfully having dropped every
+           relocation in the section - output that is numerically plausible and
+           semantically wrong, which is the exact failure this reader exists to
+           make impossible.  Check it against the file instead, and iterate with
+           a type that holds it. */
+        if (!coff_in_file((unsigned long long)file_offset + relptr,
+                          (unsigned long long)nrel * COFF_RELSZ, file_size)) {
+            tcc_error_noabort("PE-COFF object: %lu relocations for '%s' are past"
+                              " the end of the file", nrel, name);
+            goto the_end;
+        }
         relocs = load_data(fd, file_offset + relptr, nrel * COFF_RELSZ);
-        for (j = 0; j < (int)nrel; j++) {
-            unsigned char *re = relocs + j * COFF_RELSZ;
+        for (r = 0; r < nrel; r++) {
+            unsigned char *re = relocs + r * COFF_RELSZ;
             unsigned long rva = read32le(re + RE_VADDR), off;
             unsigned long symndx = read32le(re + RE_SYMNDX);
             int coff_type = read16le(re + RE_TYPE);
@@ -2934,18 +2998,22 @@ ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
             off = rva - vaddr;
             ptr = s->sh_type != SHT_NOBITS ? s->data + sec[i].offset + off : NULL;
 
-            elf_type = coff_reloc_type(coff_type, ptr, &addend, &bias, &fsize);
+            /* rawsize - off is what is left of the section at the fixup
+               site; coff_reloc_type() checks the field against it before it
+               reads the addend out of the contents. */
+            elf_type = coff_reloc_type(coff_type, ptr, rawsize - off,
+                                       &addend, &bias, &fsize);
+            if (elf_type == -2) {
+                tcc_error_noabort("PE-COFF object: relocation for '%s' at 0x%lx"
+                                  " overruns the section", name, rva);
+                goto the_end;
+            }
             if (elf_type < 0) {
                 /* Loud, by design.  An untranslated type is never passed
                    through and never skipped. */
                 tcc_error_noabort("unsupported PE-COFF relocation type %d (0x%02x)"
                                   " in section '%s' at offset 0x%lx",
                                   coff_type, coff_type, name, off);
-                goto the_end;
-            }
-            if ((unsigned long)fsize > rawsize - off) {
-                tcc_error_noabort("PE-COFF object: relocation for '%s' at 0x%lx"
-                                  " overruns the section", name, rva);
                 goto the_end;
             }
             if (symndx >= (unsigned long)nsyms) {
