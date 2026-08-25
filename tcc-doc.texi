@@ -302,6 +302,26 @@ Create eh_frame section [on]
 Create code coverage code. After running the resulting code an executable.tcov
 or sofile.tcov file is generated with code coverage.
 
+@item -ffile-prefix-map=@var{old}=@var{new}
+@itemx -fdebug-prefix-map=@var{old}=@var{new}
+@itemx -fmacro-prefix-map=@var{old}=@var{new}
+@itemx -fprofile-prefix-map=@var{old}=@var{new}
+When compiling files residing in directory @var{old}, record any references
+to them as if the files resided in directory @var{new} instead.  This keeps
+the build directory out of the generated files, which helps making builds
+reproducible and location independent.
+
+@option{-fdebug-prefix-map} affects the pathnames recorded in the debug
+information (@option{-g}), @option{-fmacro-prefix-map} the value of the
+@code{__FILE__} macro, and @option{-fprofile-prefix-map} the pathnames
+recorded for @option{-ftest-coverage} -- including the name of the
+@file{.tcov} file the program writes when it runs, which therefore also
+moves.  @option{-ffile-prefix-map} is all three at once.
+
+The mapping is a plain textual prefix replacement, no attempt is made to
+canonicalize either side (there is no @option{-fcanon-prefix-map}).  When
+several options are given, the first one whose @var{old} matches is used.
+
 @end table
 
 @subheading Warning Options
@@ -394,6 +414,18 @@ Put custom search path for dynamic libraries into executable.
 @item -Wl,--dynamic-linker=path
 Set the ELF interpreter (dynamic linker). This defaults to the value of the
 environment variable @env{LD_SO} if set, or a compiled-in default.
+
+@item -Wl,--build-id=none
+@itemx -Wl,--no-insert-timestamp
+@itemx -Wl,--hash-style=sysv
+Accepted and do nothing, because that is already what tcc does: it never
+emits a @code{.note.gnu.build-id} section, never writes a timestamp into
+its output, and emits a SysV @code{.hash} section only.  They are accepted
+so that build systems which pass them to obtain reproducible output do not
+have to special-case tcc.  The other values of these options
+(@option{--build-id}, @option{--build-id=sha1}, @option{--insert-timestamp},
+@option{--hash-style=gnu}, @option{--hash-style=both}) ask for something
+tcc does not do and remain errors.
 
 @item -Wl,--enable-new-dtags
 When putting a custom search path for dynamic libraries into the executable,
@@ -580,6 +612,15 @@ directories given with @option{-I} are searched first.
 @item LIBRARY_PATH
 A colon-separated list of directories searched for libraries for the
 @option{-l} option, directories given with @option{-L} are searched first.
+
+@item SOURCE_DATE_EPOCH
+A UNIX timestamp (seconds since 1970-01-01 00:00:00 UTC, as printed by
+@code{date +%s}) used instead of the current time for the @code{__DATE__}
+and @code{__TIME__} macros, so that the output of a compilation does not
+change from one run to the next.  The timestamp is always broken down in
+UTC, hence the result does not depend on @env{TZ} either.  A malformed
+value is an error; an empty value is treated as if the variable were not
+set.  See @url{https://reproducible-builds.org/specs/source-date-epoch/}.
 
 @end table
 

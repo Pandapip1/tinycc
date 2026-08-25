@@ -667,27 +667,30 @@ static void dwarf_file(TCCState *s1)
 {
     int i, j;
     char *filename;
+    /* -fdebug-prefix-map / -ffile-prefix-map */
+    char *mapped = tcc_prefix_map_apply(s1, PM_DEBUG, file->filename);
+    char *fname = mapped ? mapped : file->filename;
     int index_offset = s1->dwarf < 5;
 
-    if (!strcmp(file->filename, "<command line>")) {
+    if (!strcmp(fname, "<command line>")) {
         dwarf_line.cur_file = 1;
-	return;
+	goto done;
     }
-    filename = strrchr(file->filename, '/');
+    filename = strrchr(fname, '/');
     if (filename == NULL) {
         for (i = 1; i < dwarf_line.filename_size; i++)
             if (dwarf_line.filename_table[i].dir_entry == 0 &&
 		strcmp(dwarf_line.filename_table[i].name,
-		       file->filename) == 0) {
+		       fname) == 0) {
 		    dwarf_line.cur_file = i + index_offset;
-	            return;
+	            goto done;
 		}
 	i = -index_offset;
-	filename = file->filename;
+	filename = fname;
     }
     else {
 	char *undo = filename;
-	char *dir = file->filename;
+	char *dir = fname;
 
 	*filename++ = '\0';
         for (i = 0; i < dwarf_line.dir_size; i++)
@@ -699,7 +702,7 @@ static void dwarf_file(TCCState *s1)
 			       filename) == 0) {
 			*undo = '/';
 		        dwarf_line.cur_file = j + index_offset;
-			return;
+			goto done;
 		    }
 		break;
 	    }
@@ -723,6 +726,8 @@ static void dwarf_file(TCCState *s1)
     dwarf_line.filename_table[dwarf_line.filename_size].name =
         tcc_strdup(filename);
     dwarf_line.cur_file = dwarf_line.filename_size++ + index_offset;
+done:
+    tcc_free(mapped);
     return;
 }
 
@@ -1103,10 +1108,14 @@ ST_FUNC void tcc_debug_start(TCCState *s1)
 {
     int i;
     char buf[512];
-    char *filename;
+    char *filename, *mapped;
 
     /* we might currently #include the <command-line> */
     filename = file->prev ? file->prev->filename : file->filename;
+    /* -fdebug-prefix-map / -ffile-prefix-map */
+    mapped = tcc_prefix_map_apply(s1, PM_DEBUG, filename);
+    if (mapped)
+        filename = mapped;
 
     /* an elf symbol of type STT_FILE must be put so that STB_LOCAL
        symbols can be safely used */
@@ -1136,6 +1145,14 @@ ST_FUNC void tcc_debug_start(TCCState *s1)
 #ifdef _WIN32
         normalize_slashes(buf);
 #endif
+        /* -fdebug-prefix-map / -ffile-prefix-map */
+        {
+            char *m = tcc_prefix_map_apply(s1, PM_DEBUG, buf);
+            if (m) {
+                pstrcpy(buf, sizeof(buf), m);
+                tcc_free(m);
+            }
+        }
 
         if (s1->dwarf) {
             int start_abbrev;
@@ -1286,6 +1303,7 @@ ST_FUNC void tcc_debug_start(TCCState *s1)
         /* we're currently 'including' the <command line> */
         tcc_debug_bincl(s1);
     }
+    tcc_free(mapped);
 }
 
 static void fix_debug_forw_hash(TCCState *s1, int global, int start);
@@ -1428,8 +1446,13 @@ static BufferedFile* put_new_file(TCCState *s1)
         new_file = last_line_num = 0;
         if (s1->dwarf)
             dwarf_file(s1);
-        else
-            put_stabs_r(s1, f->filename, N_SOL, 0, 0, ind, text_section, section_sym);
+        else {
+            /* -fdebug-prefix-map / -ffile-prefix-map */
+            char *m = tcc_prefix_map_apply(s1, PM_DEBUG, f->filename);
+            put_stabs_r(s1, m ? m : f->filename, N_SOL, 0, 0, ind,
+                        text_section, section_sym);
+            tcc_free(m);
+        }
     }
     return f;
 }
@@ -1451,8 +1474,12 @@ ST_FUNC void tcc_debug_bincl(TCCState *s1)
         return;
     if (s1->dwarf)
         dwarf_file(s1);
-    else
-        put_stabs(s1, file->filename, N_BINCL, 0, 0, 0);
+    else {
+        /* -fdebug-prefix-map / -ffile-prefix-map */
+        char *m = tcc_prefix_map_apply(s1, PM_DEBUG, file->filename);
+        put_stabs(s1, m ? m : file->filename, N_BINCL, 0, 0, 0);
+        tcc_free(m);
+    }
     new_file = 1;
 }
 
@@ -2521,10 +2548,15 @@ ST_FUNC void tcc_tcov_block_begin(TCCState *s1)
     if (s1->test_coverage == 0 || nocode_wanted)
 	return;
 
+    {
+    /* -fprofile-prefix-map / -ffile-prefix-map */
+    char *mapped = tcc_prefix_map_apply(s1, PM_PROFILE, file->true_filename);
+    const char *true_filename = mapped ? mapped : file->true_filename;
+
     if (tcov_data.last_file_name == 0 ||
 	strcmp ((const char *)(tcov_section->data + tcov_data.last_file_name),
-		file->true_filename) != 0) {
-	char wd[1024];
+		true_filename) != 0) {
+	char wd[1024], *m;
 	CString cstr;
 
 	if (tcov_data.last_func_name)
@@ -2533,14 +2565,19 @@ ST_FUNC void tcc_tcov_block_begin(TCCState *s1)
 	    section_ptr_add(tcov_section, 1);
 	tcov_data.last_func_name = 0;
 	cstr_new (&cstr);
-	if (file->true_filename[0] == '/') {
+	if (true_filename[0] == '/') {
 	    tcov_data.last_file_name = tcov_section->data_offset;
-	    cstr_printf (&cstr, "%s", file->true_filename);
+	    cstr_printf (&cstr, "%s", true_filename);
 	}
 	else {
 	    getcwd (wd, sizeof(wd));
+	    m = tcc_prefix_map_apply(s1, PM_PROFILE, wd);
+	    if (m) {
+		pstrcpy(wd, sizeof(wd), m);
+		tcc_free(m);
+	    }
 	    tcov_data.last_file_name = tcov_section->data_offset + strlen(wd) + 1;
-	    cstr_printf (&cstr, "%s/%s", wd, file->true_filename);
+	    cstr_printf (&cstr, "%s/%s", wd, true_filename);
 	}
 	ptr = section_ptr_add(tcov_section, cstr.size + 1);
 	strcpy((char *)ptr, cstr.data);
@@ -2548,6 +2585,8 @@ ST_FUNC void tcc_tcov_block_begin(TCCState *s1)
         normalize_slashes((char *)ptr);
 #endif
 	cstr_free (&cstr);
+    }
+    tcc_free(mapped);
     }
     if (tcov_data.last_func_name == 0 ||
 	strcmp ((const char *)(tcov_section->data + tcov_data.last_func_name),

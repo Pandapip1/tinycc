@@ -950,6 +950,11 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
     cstr_free(&s1->cmdline_defs);
     cstr_free(&s1->cmdline_incl);
     tcc_free(s1->dState);
+    while (s1->prefix_map) {
+        PrefixMap *pm = s1->prefix_map;
+        s1->prefix_map = pm->next;
+        tcc_free(pm);
+    }
 #ifdef TCC_IS_NATIVE
     /* free runtime memory */
     tcc_run_free(s1);
@@ -1521,6 +1526,20 @@ static int tcc_set_linker(TCCState *s, const char *optarg)
         } else if (link_option(&o, "single_module")) {
             ignoring = 1;
 #endif
+        } else if (link_option(&o, "build-id|build-id=")) {
+            /* tcc never emits a .note.gnu.build-id section, so '=none' is
+               already what happens; anything else asks for a build-id that
+               tcc cannot compute */
+            if (strcmp(o.arg, "none"))
+                goto err;
+        } else if (!!(r = link_option(&o, "?insert-timestamp"))) {
+            /* tcc never writes a timestamp into its output */
+            if (r > 0)
+                goto err;
+        } else if (link_option(&o, "hash-style=")) {
+            /* tcc emits a SysV .hash section and nothing else */
+            if (strcmp(o.arg, "sysv"))
+                goto err;
         } else if (link_option(&o, "as-needed")) {
             ignoring = 1;
         } else if (link_option(&o, "O")) {
@@ -1743,6 +1762,71 @@ static const FlagDef options_m[] = {
 #endif
     { 0, 0, NULL }
 };
+
+/* -f{file,debug,macro,profile}-prefix-map=OLD=NEW: record pathnames as if
+   the files resided in NEW instead of OLD, so that the output of a build does
+   not depend on where the build happened.  Returns 1 if 'optarg' named one of
+   these options, 0 if it did not, -1 on error. */
+ST_FUNC int tcc_prefix_map_option(TCCState *s1, const char *optarg)
+{
+    static const struct { const char *name; int kinds; } pm_opt[] = {
+        { "file-prefix-map=", PM_ALL },
+        { "debug-prefix-map=", PM_DEBUG },
+        { "macro-prefix-map=", PM_MACRO },
+        { "profile-prefix-map=", PM_PROFILE },
+        { NULL, 0 }
+    };
+    const char *arg, *eq;
+    PrefixMap *pm, **pp;
+    int i, len;
+
+    for (i = 0;; ++i) {
+        if (pm_opt[i].name == NULL)
+            return 0;
+        arg = optarg;
+        if (strstart(pm_opt[i].name, &arg))
+            break;
+    }
+    /* OLD may not be empty, NEW may (that maps OLD away entirely) */
+    eq = strchr(arg, '=');
+    if (eq == NULL || eq == arg)
+        return tcc_error_noabort("-f%s: expected OLD=NEW", optarg);
+    len = strlen(arg);
+    pm = tcc_mallocz(sizeof(PrefixMap) + len);
+    memcpy(pm->old_pfx, arg, len + 1);
+    pm->old_len = eq - arg;
+    pm->old_pfx[pm->old_len] = '\0';
+    pm->new_pfx = pm->old_pfx + pm->old_len + 1;
+    pm->kinds = pm_opt[i].kinds;
+    /* keep command line order: the first matching mapping is the one used */
+    for (pp = &s1->prefix_map; *pp; pp = &(*pp)->next)
+        ;
+    *pp = pm;
+    return 1;
+}
+
+/* Apply the -f...-prefix-map options that affect 'kind' (one of PM_DEBUG,
+   PM_MACRO, PM_PROFILE) to the pathname 'path'.  Returns NULL when no
+   mapping applies, else a string which the caller must tcc_free(). */
+ST_FUNC char *tcc_prefix_map_apply(TCCState *s1, int kind, const char *path)
+{
+    PrefixMap *pm;
+
+    for (pm = s1->prefix_map; pm; pm = pm->next) {
+        int nlen;
+        char *r;
+        if (0 == (pm->kinds & kind))
+            continue;
+        if (0 != memcmp(path, pm->old_pfx, pm->old_len))
+            continue;
+        nlen = strlen(pm->new_pfx);
+        r = tcc_malloc(nlen + strlen(path + pm->old_len) + 1);
+        memcpy(r, pm->new_pfx, nlen);
+        strcpy(r + nlen, path + pm->old_len);
+        return r;
+    }
+    return NULL;
+}
 
 static int set_flag(TCCState *s, const FlagDef *flags, const char *name)
 {
@@ -2051,7 +2135,10 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
             do ++s->verbose; while (*optarg++ == 'v');
             continue;
         case TCC_OPTION_f:
-            if (set_flag(s, options_f, optarg) < 0)
+            x = tcc_prefix_map_option(s, optarg);
+            if (x < 0)
+                return -1;
+            if (x == 0 && set_flag(s, options_f, optarg) < 0)
                 goto unsupported_option;
             break;
 #ifdef TCC_TARGET_ARM

@@ -3102,6 +3102,50 @@ static int *macro_arg_subst(Sym **nested_list, const int *macro_str, Sym *args)
     return str.str;
 }
 
+/* Return the broken down time to be used for __DATE__ and __TIME__.
+
+   If the environment variable SOURCE_DATE_EPOCH is set it is used instead of
+   the current time, as required by
+   https://reproducible-builds.org/specs/source-date-epoch/ :
+
+     "Build processes MUST use this variable for embedded timestamps in place
+      of the 'current' date and time."
+
+   The value is "A UNIX timestamp, defined as the number of seconds, excluding
+   leap seconds, since 01 Jan 1970 00:00:00 UTC", so it is broken down with
+   gmtime() and the result therefore does not depend on the TZ environment
+   variable.  Without SOURCE_DATE_EPOCH the previous behaviour (local time) is
+   kept.
+
+   "If the value is malformed, the build process SHOULD exit with a non-zero
+   error code", which is what tcc_error() does.  An empty value is treated as
+   if the variable were not set at all.  The variable is only looked at when
+   __DATE__ or __TIME__ is actually expanded. */
+static struct tm *build_time(void)
+{
+    const char *sde = getenv("SOURCE_DATE_EPOCH");
+    struct tm *tm;
+    time_t ti;
+
+    if (sde && *sde) {
+        unsigned long long v;
+        char *end;
+
+        /* strtoull() by itself would accept leading white space and a sign,
+           neither of which is "identical to the output format of date +%s" */
+        errno = 0;
+        v = strtoull(sde, &end, 10);
+        if (*sde < '0' || *sde > '9' || *end != '\0' || errno == ERANGE
+            || (ti = (time_t)v, (unsigned long long)ti != v)
+            || (tm = gmtime(&ti)) == NULL)
+            tcc_error("environment variable SOURCE_DATE_EPOCH must expand to"
+                      " a non-negative integer, not '%s'", sde);
+        return tm;
+    }
+    time(&ti);
+    return localtime(&ti);
+}
+
 /* handle the '##' operator. return the resulting string (which must be freed). */
 static inline int *macro_twosharps(const int *ptr0)
 {
@@ -3362,7 +3406,7 @@ static int macro_subst_tok(
 
     } else {
         CValue cval;
-        char buf[32], *cstrval = buf;
+        char buf[32], *cstrval = buf, *mapped = NULL;
 
         /* special macros */
         if (v == TOK___LINE__ || v == TOK___COUNTER__) {
@@ -3373,13 +3417,14 @@ static int macro_subst_tok(
 
         } else if (v == TOK___FILE__) {
             cstrval = file->filename;
+            /* -fmacro-prefix-map / -ffile-prefix-map */
+            if (tcc_state->prefix_map
+                && (mapped = tcc_prefix_map_apply(tcc_state, PM_MACRO, cstrval)))
+                cstrval = mapped;
             goto add_cstr;
 
         } else if (v == TOK___DATE__ || v == TOK___TIME__) {
-            time_t ti;
-            struct tm *tm;
-            time(&ti);
-            tm = localtime(&ti);
+            struct tm *tm = build_time();
             if (v == TOK___DATE__) {
                 static char const ab_month_name[12][4] = {
                     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -3397,6 +3442,7 @@ static int macro_subst_tok(
             cval.str.size = strlen(cstrval) + 1;
             cval.str.data = cstrval;
             tok_str_add2_spc(tok_str, t, &cval);
+            tcc_free(mapped);
         }
         return 0;
     }

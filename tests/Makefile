@@ -19,6 +19,7 @@ TESTS = \
  vla_test-run \
  tests2-dir \
  pp-dir \
+ reprotest \
  memtest \
  dlltest \
  cross-test \
@@ -297,6 +298,11 @@ pe-coff-test:
 	@echo ------------ $@ ------------
 	@$(SHELL) $(TOPSRC)/tests/pe-coff-test.sh $(TOPSRC) $(TOP) "$(MAKE)"
 
+# reproducible output: SOURCE_DATE_EPOCH, -f...-prefix-map=, linker options
+reprotest:
+	@echo ------------ $@ ------------
+	@$(SHELL) $(TOPSRC)/tests/reprotest.sh "$(TCC)" $(TOPSRC)
+
 # quick sanity check for cross-compilers
 cross-test : tcctest.c examples/ex3.c
 	@echo ------------ $@ ------------
@@ -353,7 +359,7 @@ clean:
 	rm -f *-cc *-gcc *-tcc *.exe hello libtcc_test vla_test tcctest[1234]
 	rm -f asm-c-connect asm-c-connect-sep
 	rm -f ex? tcc_g weaktest.*.txt *.def *.pdb *.obj libtcc_test_mt
-	rm -rf pe-coff-tmp
+	rm -rf pe-coff-tmp repro-tmp
 	@$(MAKE) -C tests2 $@
 	@$(MAKE) -C pp $@
 
