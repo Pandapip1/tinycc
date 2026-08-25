@@ -804,28 +804,16 @@ static void asm_parse_directive(TCCState *s1, int global)
 	}
 	break;
     case TOK_ASMDIR_file:
-        {
-            const char *p;
-            int saved_flags = parse_flags;
-            /* the code below wants the raw, still quoted TOK_PPSTR form */
-            parse_flags &= ~PARSE_FLAG_TOK_STR;
-            next();
-            if (tok == TOK_PPNUM)
-                next();
-            if (tok == TOK_PPSTR && tokc.str.data[0] == '"') {
-                tokc.str.data[tokc.str.size - 2] = 0;
-                p = tokc.str.data + 1;
-            } else if (tok >= TOK_IDENT) {
-                p = get_tok_str(tok, &tokc);
-            } else {
-                skip_to_eol(0);
-                parse_flags = saved_flags;
-                break;
-            }
-            tccpp_putfile(p);
-            parse_flags = saved_flags;
-            next();
-        }
+        /* '.file' names the source file for debug info only.  It used to be
+           routed to tccpp_putfile(), which renames the current file for
+           every later diagnostic and for the DWARF line table - but it does
+           not, and cannot, renumber the lines: tcc has no '.loc', so the
+           lines still count the .s file.  The result named one file at
+           another file's line numbers.  gas reports the real .s in its own
+           messages, so do that and simply ignore the directive.  Skipping
+           the whole line without lexing it also copes with the DWARF 5
+           form '.file 0 "dir" "name"' that gcc -S -g emits. */
+        skip_to_eol(0);
         break;
     case TOK_ASMDIR_ident:
         {
