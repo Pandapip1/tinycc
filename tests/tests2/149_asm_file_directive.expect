@@ -1,0 +1,14 @@
+[test_file_then_section]
+section-ok
+
+[test_file_then_ascii]
+ascii-ok
+
+[test_file_then_type]
+type-ok
+
+[test_file_twice]
+twice-ok
+
+[test_file_remaps_diagnostics]
+asmfile.c:2: error: missing terminating " character
