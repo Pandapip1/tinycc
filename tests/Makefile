@@ -23,7 +23,8 @@ TESTS = \
  memtest \
  dlltest \
  cross-test \
- pe-coff-test
+ pe-coff-test \
+ pe-header-test
 
 # test4_static -- Not all relocation types are implemented yet.
 # asmtest / asmtest2 -- minor differences with gcc
@@ -303,6 +304,12 @@ reprotest:
 	@echo ------------ $@ ------------
 	@$(SHELL) $(TOPSRC)/tests/reprotest.sh "$(TCC)" $(TOPSRC)
 
+# the PE image header: check the bytes tcc writes against the section table
+# they describe.  Needs no Windows and no wine.
+pe-header-test:
+	@echo ------------ $@ ------------
+	@$(SHELL) $(TOPSRC)/tests/pe-header-test.sh $(TOPSRC) $(TOP) "$(MAKE)"
+
 # quick sanity check for cross-compilers
 cross-test : tcctest.c examples/ex3.c
 	@echo ------------ $@ ------------
@@ -359,7 +366,7 @@ clean:
 	rm -f *-cc *-gcc *-tcc *.exe hello libtcc_test vla_test tcctest[1234]
 	rm -f asm-c-connect asm-c-connect-sep
 	rm -f ex? tcc_g weaktest.*.txt *.def *.pdb *.obj libtcc_test_mt
-	rm -rf pe-coff-tmp repro-tmp
+	rm -rf pe-coff-tmp repro-tmp pe-header-tmp
 	@$(MAKE) -C tests2 $@
 	@$(MAKE) -C pp $@
 

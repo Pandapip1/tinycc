@@ -317,6 +317,7 @@ typedef struct _IMAGE_BASE_RELOCATION {
 #define IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE 0x8000
 
 #define IMAGE_FILE_RELOCS_STRIPPED 0x0001
+#define IMAGE_FILE_DEBUG_STRIPPED 0x0200
 
 #pragma pack(pop)
 
@@ -740,6 +741,28 @@ static int pe_write(struct pe_info *pe)
     if (s1->do_debug)
         pe_add_coffsym(pe);
 
+    /* pe_file_align()/pe_virtual_align() round with a bit mask, which is
+       correct only for a power of two.  Any other value silently produces a
+       header advertising an alignment the layout does not obey, so this is
+       an error rather than a warning: unlike the sub-page section alignment
+       warned about below, such an image is self-contradictory, not merely
+       unloadable by a current Windows.  Checked here, before the output file
+       is created, so a rejected build leaves no truncated .exe behind; still
+       in pe_write() rather than pe_set_options(), which also runs on the
+       -run path, where no header is written and the values do not matter.
+       tcc's own defaults (0x20/0x200/0x1000) can never trip these. */
+    if (pe->file_align & (pe->file_align - 1))
+        return tcc_error_noabort("file alignment 0x%x is not a power of two",
+            pe->file_align);
+    if (pe->section_align & (pe->section_align - 1))
+        return tcc_error_noabort("section alignment 0x%x is not a power of two",
+            pe->section_align);
+    /* PE Format, Optional Header Windows-Specific Fields: SectionAlignment
+       "must be greater than or equal to FileAlignment" */
+    if (pe->file_align > pe->section_align)
+        return tcc_error_noabort("file alignment 0x%x exceeds section"
+            " alignment 0x%x", pe->file_align, pe->section_align);
+
     pe->op = fopen(pe->filename, "wb");
     if (NULL == pe->op)
         return tcc_error_noabort("could not write '%s': %s", pe->filename, strerror(errno));
@@ -816,10 +839,15 @@ static int pe_write(struct pe_info *pe)
                 pe->tls_dir + (pe->thunk->sh_addr - pe->imagebase), pe->tls_size);
         }
 
-        memcpy(psh->Name, sh_name, umin(strlen(sh_name), sizeof psh->Name));
         if (pe->coffstr && strlen(sh_name) > 8) {
-            /* long section name, for example ".debug_info" */
-            snprintf((char*)psh->Name, 8, "/%d", put_elf_str(pe->coffstr, sh_name));
+            /* long section name, for example ".debug_info": the header holds
+               "/<offset>" into the coff string table.  Nothing else may be
+               copied in first -- Name is a null-padded 8-byte field, and the
+               tail of the real name would otherwise survive past the NUL. */
+            snprintf((char*)psh->Name, sizeof psh->Name, "/%d",
+                put_elf_str(pe->coffstr, sh_name));
+        } else {
+            memcpy(psh->Name, sh_name, umin(strlen(sh_name), sizeof psh->Name));
         }
 
         psh->Characteristics = si->pe_flags;
@@ -827,6 +855,15 @@ static int pe_write(struct pe_info *pe)
         psh->Misc.VirtualSize = size;
         pe_header.opthdr.SizeOfImage =
             umax(pe_virtual_align(pe, size + addr), pe_header.opthdr.SizeOfImage);
+
+        /* PE Format, Optional Header Standard Fields: SizeOfUninitializedData
+           is "the sum of all such sections if there are multiple BSS
+           sections".  Keyed on the flag that is written into this very
+           section header, so the two always agree.  A BSS section has no
+           file-resident data and so never reaches the SizeOfCode /
+           SizeOfInitializedData split below; its size is its virtual size. */
+        if (si->pe_flags & IMAGE_SCN_CNT_UNINITIALIZED_DATA)
+            pe_header.opthdr.SizeOfUninitializedData += size;
 
         if (si->data_size) {
             psh->PointerToRawData = file_offset;
@@ -845,11 +882,23 @@ static int pe_write(struct pe_info *pe)
     pe_header.opthdr.SizeOfHeaders = pe->sizeofheaders;
     pe_header.opthdr.SectionAlignment = pe->section_align;
     pe_header.opthdr.FileAlignment = pe->file_align;
+    /* the errors that rule these values out are raised before the
+       output file is created, at the top of this function */
     /* only warn when the user asked for this alignment; tcc's own native
        default is unmeasured (see pe_set_options()) */
     if (s1->section_align && pe->section_align < 0x1000)
         tcc_warning("section alignment 0x%x is below the page size;"
             " modern Windows will not load this image", pe->section_align);
+    /* same field: FileAlignment "should be a power of 2 between 512 and
+       64 K, inclusive", the exception being a sub-page SectionAlignment,
+       which FileAlignment must then match.  A warning, not an error: the
+       image stays self-consistent, and as above tcc's own native default is
+       not warned about -- only a value the user asked for. */
+    if (s1->pe_file_align
+        && (pe->file_align < 0x200 || pe->file_align > 0x10000)
+        && !(pe->section_align < 0x1000 && pe->file_align == pe->section_align))
+        tcc_warning("file alignment 0x%x is outside the 512..64K range the"
+            " PE format specifies", pe->file_align);
     pe_header.opthdr.ImageBase = pe->imagebase;
     pe_header.opthdr.Subsystem = pe->subsystem;
     pe_header.opthdr.DllCharacteristics = s1->pe_dll_characteristics;
@@ -866,6 +915,11 @@ static int pe_write(struct pe_info *pe)
         pe_header.filehdr.PointerToSymbolTable = file_offset;
         pe_header.filehdr.NumberOfSymbols
             = pe->coffsym->data_offset / sizeof (struct syment);
+        /* the image really does carry debugging information now, so it may
+           not claim IMAGE_FILE_DEBUG_STRIPPED.  IMAGE_FILE_LOCAL_SYMS_STRIPPED
+           stays set and is accurate: pe_add_coffsym() emits STB_GLOBAL
+           symbols only. */
+        pe_header.filehdr.Characteristics &= ~IMAGE_FILE_DEBUG_STRIPPED;
     }
 
     pe_fwrite(pe, &pe_header, sizeof pe_header);
