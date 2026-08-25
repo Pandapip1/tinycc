@@ -1,0 +1,21 @@
+[test_asm_unknown_opcode]
+150_asm_diagnostics.c:14: error: unknown opcode 'bogus_insn'
+
+[test_asm_unknown_opcode_2nd_line]
+150_asm_diagnostics.c:21: error: unknown opcode 'bogus_insn'
+
+[test_asm_unknown_opcode_3rd_line]
+150_asm_diagnostics.c:29: error: unknown opcode 'bogus_insn'
+
+[test_asm_global]
+150_asm_diagnostics.c:36: error: unknown opcode 'bogus_insn'
+
+[test_asm_popsection]
+150_asm_diagnostics.c:43: error: .popsection without .pushsection
+
+[test_asm_pushsection_leak]
+150_asm_diagnostics.c:52: warning: inline asm tries to change current section
+150_asm_diagnostics.c:57: error: .popsection without .pushsection
+
+[test_asm_ident_control]
+150_asm_diagnostics.c:68: warning: ignoring .ident zz
