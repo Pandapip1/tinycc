@@ -492,20 +492,27 @@ static void use_section(TCCState *s1, const char *name)
     use_section1(s1, sec);
 }
 
+/* .pushsection/.popsection nesting stack.  This cannot be kept in the
+   Section itself: pushing the same section at two nesting levels would
+   overwrite the saved link and lose a level. */
+#define SECTION_STACK_SIZE 32
+static Section *section_stack[SECTION_STACK_SIZE];
+static int nb_section_stack;
+
 static void push_section(TCCState *s1, const char *name)
 {
     Section *sec = find_section(s1, name);
-    sec->prev = cur_text_section;
+    if (nb_section_stack >= SECTION_STACK_SIZE)
+        tcc_error(".pushsection nested too deeply");
+    section_stack[nb_section_stack++] = cur_text_section;
     use_section1(s1, sec);
 }
 
 static void pop_section(TCCState *s1)
 {
-    Section *prev = cur_text_section->prev;
-    if (!prev)
+    if (nb_section_stack == 0)
         tcc_error(".popsection without .pushsection");
-    cur_text_section->prev = NULL;
-    use_section1(s1, prev);
+    use_section1(s1, section_stack[--nb_section_stack]);
 }
 
 static void asm_parse_directive(TCCState *s1, int global)
@@ -1137,6 +1144,7 @@ ST_FUNC int tcc_assemble(TCCState *s1, int do_preprocess)
     int ret;
     tcc_debug_start(s1);
     /* default section is text */
+    nb_section_stack = 0;
     cur_text_section = text_section;
     ind = cur_text_section->data_offset;
     nocode_wanted = 0;
@@ -1364,6 +1372,7 @@ ST_FUNC void asm_instr(void)
     int nb_outputs, nb_operands, i, must_subst, out_reg, nb_labels;
     uint8_t clobber_regs[NB_ASM_REGS];
     Section *sec;
+    int sec_stack_level;
 
     /* since we always generate the asm() instruction, we can ignore
        volatile */
@@ -1484,6 +1493,7 @@ ST_FUNC void asm_instr(void)
     /* We don't allow switching section within inline asm to
        bleed out to surrounding code.  */
     sec = cur_text_section;
+    sec_stack_level = nb_section_stack;
     /* assemble the string with tcc internal assembler */
     tcc_assemble_inline(tcc_state, astr.data, astr.size - 1, 0);
     cstr_free_s(&astr);
@@ -1491,6 +1501,8 @@ ST_FUNC void asm_instr(void)
         tcc_warning("inline asm tries to change current section");
         use_section1(tcc_state, sec);
     }
+    /* an unbalanced .pushsection must not skew the stack either */
+    nb_section_stack = sec_stack_level;
 
     /* restore the current C token */
     next();
