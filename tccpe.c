@@ -839,10 +839,15 @@ static int pe_write(struct pe_info *pe)
                 pe->tls_dir + (pe->thunk->sh_addr - pe->imagebase), pe->tls_size);
         }
 
-        memcpy(psh->Name, sh_name, umin(strlen(sh_name), sizeof psh->Name));
         if (pe->coffstr && strlen(sh_name) > 8) {
-            /* long section name, for example ".debug_info" */
-            snprintf((char*)psh->Name, 8, "/%d", put_elf_str(pe->coffstr, sh_name));
+            /* long section name, for example ".debug_info": the header holds
+               "/<offset>" into the coff string table.  Nothing else may be
+               copied in first -- Name is a null-padded 8-byte field, and the
+               tail of the real name would otherwise survive past the NUL. */
+            snprintf((char*)psh->Name, sizeof psh->Name, "/%d",
+                put_elf_str(pe->coffstr, sh_name));
+        } else {
+            memcpy(psh->Name, sh_name, umin(strlen(sh_name), sizeof psh->Name));
         }
 
         psh->Characteristics = si->pe_flags;
