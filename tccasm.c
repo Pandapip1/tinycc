@@ -799,6 +799,8 @@ static void asm_parse_directive(TCCState *s1, int global)
     case TOK_ASMDIR_file:
         {
             const char *p;
+            int saved_flags = parse_flags;
+            /* the code below wants the raw, still quoted TOK_PPSTR form */
             parse_flags &= ~PARSE_FLAG_TOK_STR;
             next();
             if (tok == TOK_PPNUM)
@@ -810,9 +812,11 @@ static void asm_parse_directive(TCCState *s1, int global)
                 p = get_tok_str(tok, &tokc);
             } else {
                 skip_to_eol(0);
+                parse_flags = saved_flags;
                 break;
             }
             tccpp_putfile(p);
+            parse_flags = saved_flags;
             next();
         }
         break;

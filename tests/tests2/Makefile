@@ -18,6 +18,7 @@ endif
 ifeq (,$(filter i386 x86_64,$(ARCH)))
  SKIP += 85_asm-outside-function.test # x86 asm
  SKIP += 127_asm_goto.test    # hardcodes x86 asm
+ SKIP += 149_asm_file_directive.test # x86 asm
 endif
 ifeq ($(CONFIG_backtrace),no)
  SKIP += 113_btdll.test
@@ -99,6 +100,7 @@ endif
 60_errors_and_warnings.test : FLAGS += -dt
 96_nodata_wanted.test : FLAGS += -dt
 139_arm64_errors.test : FLAGS += -dt
+149_asm_file_directive.test : FLAGS += -dt
 
 GEN-ALWAYS =
 # GEN-ALWAYS += 95_bitfields.expect # does not work
