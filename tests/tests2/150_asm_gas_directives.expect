@@ -22,5 +22,9 @@ entsize-ok 1234
 [test_shift_and_cltq]
 40 -1 0
 
+[test_section_default_type]
+ctor
+main
+
 [test_rip_immediate]
 0 55 0

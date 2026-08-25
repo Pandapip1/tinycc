@@ -3,6 +3,12 @@
 
 int printf(const char*, ...);
 
+#if defined __x86_64__ || defined __aarch64__ || defined __riscv
+# define PTRSZ 8
+#else
+# define PTRSZ 4
+#endif
+
 #if defined test_zero
 
 /* '.zero' is an alias of '.skip': N zero bytes, or N copies of an
@@ -165,6 +171,26 @@ static int sh3(int x) { return x << 3; }
 static int sxhi(int x) { return x < 0 ? -1 : 0; }
 #endif
 int main(void) { printf("%d %d %d\n", sh3(5), sxhi(-1), sxhi(1)); return 0; }
+
+#elif defined test_section_default_type
+
+/* '.section' without an explicit type: GAS derives one from the name,
+   so .init_array really is SHT_INIT_ARRAY and its entries run.
+   NOTE: this block also passes before the fix, because 'tcc -run' does
+   not mind the wrong section type.  The type mattered when linking a
+   gcc -S object, whose '.section .note.gnu.property,"a"' came out
+   PROGBITS and collided with the SHT_NOTE section in Scrt1.o
+   ("section type conflict: .note.gnu.property 01 <> 07").  This block
+   guards the name-derived type from regressing. */
+void ctor(void) { printf("ctor\n"); }
+__asm__(".section .init_array,\"aw\"\n"
+#if PTRSZ == 8
+        "  .quad ctor\n"
+#else
+        "  .long ctor\n"
+#endif
+        ".text\n");
+int main(void) { printf("main\n"); return 0; }
 
 #elif defined test_rip_immediate
 
