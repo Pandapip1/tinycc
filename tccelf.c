@@ -1736,9 +1736,17 @@ static void tcc_tcov_add_file(TCCState *s1, const char *filename)
         getcwd (wd, sizeof(wd));
         cstr_printf (&cstr, "%s/%s.tcov", wd, filename);
     }
-    ptr = section_ptr_add(tcov_section, cstr.size + 1);
-    strcpy((char *)ptr, cstr.data);
-    unlink((char *)ptr);
+    /* drop a stale data file: this is done on the real name, before the
+       name that gets recorded into the program is remapped */
+    unlink(cstr.data);
+    {
+        /* -fprofile-prefix-map / -ffile-prefix-map */
+        char *m = tcc_prefix_map_apply(s1, PM_PROFILE, cstr.data);
+        const char *name = m ? m : cstr.data;
+        ptr = section_ptr_add(tcov_section, strlen(name) + 1);
+        strcpy((char *)ptr, name);
+        tcc_free(m);
+    }
 #ifdef _WIN32
     normalize_slashes((char *)ptr);
 #endif

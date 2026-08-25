@@ -3406,7 +3406,7 @@ static int macro_subst_tok(
 
     } else {
         CValue cval;
-        char buf[32], *cstrval = buf;
+        char buf[32], *cstrval = buf, *mapped = NULL;
 
         /* special macros */
         if (v == TOK___LINE__ || v == TOK___COUNTER__) {
@@ -3417,6 +3417,10 @@ static int macro_subst_tok(
 
         } else if (v == TOK___FILE__) {
             cstrval = file->filename;
+            /* -fmacro-prefix-map / -ffile-prefix-map */
+            if (tcc_state->prefix_map
+                && (mapped = tcc_prefix_map_apply(tcc_state, PM_MACRO, cstrval)))
+                cstrval = mapped;
             goto add_cstr;
 
         } else if (v == TOK___DATE__ || v == TOK___TIME__) {
@@ -3438,6 +3442,7 @@ static int macro_subst_tok(
             cval.str.size = strlen(cstrval) + 1;
             cval.str.data = cstrval;
             tok_str_add2_spc(tok_str, t, &cval);
+            tcc_free(mapped);
         }
         return 0;
     }

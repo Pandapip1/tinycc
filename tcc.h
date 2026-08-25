@@ -732,6 +732,21 @@ struct sym_attr {
 #endif
 };
 
+/* kinds of recorded pathname affected by a -f...-prefix-map= option */
+#define PM_DEBUG    1  /* -fdebug-prefix-map:   debug info (dwarf, stabs) */
+#define PM_MACRO    2  /* -fmacro-prefix-map:   the __FILE__ macro */
+#define PM_PROFILE  4  /* -fprofile-prefix-map: -ftest-coverage data */
+#define PM_ALL      (PM_DEBUG | PM_MACRO | PM_PROFILE) /* -ffile-prefix-map */
+
+/* one OLD=NEW pathname mapping, see tcc_prefix_map_apply() */
+typedef struct PrefixMap {
+    struct PrefixMap *next;
+    int kinds;          /* which PM_xxx this mapping applies to */
+    int old_len;
+    const char *new_pfx;
+    char old_pfx[1];    /* "OLD\0NEW\0", new_pfx points at NEW */
+} PrefixMap;
+
 struct TCCState {
     unsigned char verbose; /* if true, display some information during compilation */
     unsigned char nostdinc; /* if true, no standard headers are added */
@@ -785,6 +800,9 @@ struct TCCState {
     unsigned char do_bounds_check;
 #endif
     unsigned char test_coverage;  /* generate test coverage code */
+
+    /* -f{file,debug,macro,profile}-prefix-map=OLD=NEW, in command line order */
+    PrefixMap *prefix_map;
 
     /* use GNU C extensions */
     unsigned char gnu_ext;
@@ -1263,6 +1281,8 @@ ST_FUNC void cstr_free(CString *cstr);
 ST_FUNC int cstr_printf(CString *cs, const char *fmt, ...) PRINTF_LIKE(2,3);
 ST_FUNC int cstr_vprintf(CString *cstr, const char *fmt, va_list ap);
 ST_FUNC void cstr_reset(CString *cstr);
+ST_FUNC int tcc_prefix_map_option(TCCState *s1, const char *optarg);
+ST_FUNC char *tcc_prefix_map_apply(TCCState *s1, int kind, const char *path);
 ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen);
 ST_FUNC int tcc_open(TCCState *s1, const char *filename);
 ST_FUNC void tcc_close(void);

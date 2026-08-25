@@ -127,6 +127,11 @@ static const char help2[] =
     "  gnu89-inline                  'extern inline' is like 'static inline'\n"
     "  asynchronous-unwind-tables    create eh_frame section [on]\n"
     "  test-coverage                 create code coverage code\n"
+    "-f...-prefix-map=OLD=NEW record pathnames starting with OLD as NEW:\n"
+    "  file-prefix-map=OLD=NEW       all of the three below\n"
+    "  debug-prefix-map=OLD=NEW      in the debug info\n"
+    "  macro-prefix-map=OLD=NEW      in the __FILE__ macro\n"
+    "  profile-prefix-map=OLD=NEW    in the -ftest-coverage data\n"
     "-m... target specific options:\n"
     "  ms-bitfields                  use MSVC bitfield layout\n"
 #ifdef TCC_TARGET_ARM

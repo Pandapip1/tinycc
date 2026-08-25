@@ -302,6 +302,26 @@ Create eh_frame section [on]
 Create code coverage code. After running the resulting code an executable.tcov
 or sofile.tcov file is generated with code coverage.
 
+@item -ffile-prefix-map=@var{old}=@var{new}
+@itemx -fdebug-prefix-map=@var{old}=@var{new}
+@itemx -fmacro-prefix-map=@var{old}=@var{new}
+@itemx -fprofile-prefix-map=@var{old}=@var{new}
+When compiling files residing in directory @var{old}, record any references
+to them as if the files resided in directory @var{new} instead.  This keeps
+the build directory out of the generated files, which helps making builds
+reproducible and location independent.
+
+@option{-fdebug-prefix-map} affects the pathnames recorded in the debug
+information (@option{-g}), @option{-fmacro-prefix-map} the value of the
+@code{__FILE__} macro, and @option{-fprofile-prefix-map} the pathnames
+recorded for @option{-ftest-coverage} -- including the name of the
+@file{.tcov} file the program writes when it runs, which therefore also
+moves.  @option{-ffile-prefix-map} is all three at once.
+
+The mapping is a plain textual prefix replacement, no attempt is made to
+canonicalize either side (there is no @option{-fcanon-prefix-map}).  When
+several options are given, the first one whose @var{old} matches is used.
+
 @end table
 
 @subheading Warning Options
