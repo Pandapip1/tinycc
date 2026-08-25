@@ -740,6 +740,28 @@ static int pe_write(struct pe_info *pe)
     if (s1->do_debug)
         pe_add_coffsym(pe);
 
+    /* pe_file_align()/pe_virtual_align() round with a bit mask, which is
+       correct only for a power of two.  Any other value silently produces a
+       header advertising an alignment the layout does not obey, so this is
+       an error rather than a warning: unlike the sub-page section alignment
+       warned about below, such an image is self-contradictory, not merely
+       unloadable by a current Windows.  Checked here, before the output file
+       is created, so a rejected build leaves no truncated .exe behind; still
+       in pe_write() rather than pe_set_options(), which also runs on the
+       -run path, where no header is written and the values do not matter.
+       tcc's own defaults (0x20/0x200/0x1000) can never trip these. */
+    if (pe->file_align & (pe->file_align - 1))
+        return tcc_error_noabort("file alignment 0x%x is not a power of two",
+            pe->file_align);
+    if (pe->section_align & (pe->section_align - 1))
+        return tcc_error_noabort("section alignment 0x%x is not a power of two",
+            pe->section_align);
+    /* PE Format, Optional Header Windows-Specific Fields: SectionAlignment
+       "must be greater than or equal to FileAlignment" */
+    if (pe->file_align > pe->section_align)
+        return tcc_error_noabort("file alignment 0x%x exceeds section"
+            " alignment 0x%x", pe->file_align, pe->section_align);
+
     pe->op = fopen(pe->filename, "wb");
     if (NULL == pe->op)
         return tcc_error_noabort("could not write '%s': %s", pe->filename, strerror(errno));
@@ -854,11 +876,23 @@ static int pe_write(struct pe_info *pe)
     pe_header.opthdr.SizeOfHeaders = pe->sizeofheaders;
     pe_header.opthdr.SectionAlignment = pe->section_align;
     pe_header.opthdr.FileAlignment = pe->file_align;
+    /* the errors that rule these values out are raised before the
+       output file is created, at the top of this function */
     /* only warn when the user asked for this alignment; tcc's own native
        default is unmeasured (see pe_set_options()) */
     if (s1->section_align && pe->section_align < 0x1000)
         tcc_warning("section alignment 0x%x is below the page size;"
             " modern Windows will not load this image", pe->section_align);
+    /* same field: FileAlignment "should be a power of 2 between 512 and
+       64 K, inclusive", the exception being a sub-page SectionAlignment,
+       which FileAlignment must then match.  A warning, not an error: the
+       image stays self-consistent, and as above tcc's own native default is
+       not warned about -- only a value the user asked for. */
+    if (s1->pe_file_align
+        && (pe->file_align < 0x200 || pe->file_align > 0x10000)
+        && !(pe->section_align < 0x1000 && pe->file_align == pe->section_align))
+        tcc_warning("file alignment 0x%x is outside the 512..64K range the"
+            " PE format specifies", pe->file_align);
     pe_header.opthdr.ImageBase = pe->imagebase;
     pe_header.opthdr.Subsystem = pe->subsystem;
     pe_header.opthdr.DllCharacteristics = s1->pe_dll_characteristics;
