@@ -423,6 +423,12 @@
  DEF_ASMDIR(int)
  DEF_ASMDIR(symver)
  DEF_ASMDIR(reloc)
+ DEF_ASMDIR(zero)
+ DEF_ASMDIR(comm)
+ DEF_ASMDIR(local)
+ DEF_ASMDIR(lcomm)
+ DEF_ASMDIR(uleb128)
+ DEF_ASMDIR(sleb128)
  DEF_ASMDIR(section)    /* must be last directive */
 
 #if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64

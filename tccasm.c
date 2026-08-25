@@ -24,6 +24,65 @@
 
 static Section *last_text_section; /* to handle .previous asm directive */
 static int asmgoto_n;
+static int warned_cfi; /* .cfi_* directives seen and ignored */
+
+/* Deferred 'labelA - labelB' differences in data directives.  Needed for
+   forward local label references such as '.long 1f - 0f', which GAS
+   accepts (see GAS docs, "Symbol Names": Local Labels).  We cannot know
+   the value until both labels have been seen, so the location is filled
+   with zeroes and patched once the assembly unit is complete. */
+typedef struct AsmDiffFixup {
+    struct AsmDiffFixup *next;
+    Section *sec;
+    int offset;
+    int size;
+    Sym *sym;
+    Sym *sym2;
+    int64_t addend;
+} AsmDiffFixup;
+
+static AsmDiffFixup *asm_diff_fixups;
+/* non-zero while parsing an expression whose value may be patched later */
+static int asm_defer_diff;
+
+static void asm_defer_expr(Section *sec, int offset, int size, ExprValue *pe)
+{
+    AsmDiffFixup *f = tcc_malloc(sizeof(*f));
+    f->next = asm_diff_fixups;
+    f->sec = sec;
+    f->offset = offset;
+    f->size = size;
+    f->sym = pe->sym;
+    f->sym2 = pe->sym2;
+    f->addend = (int64_t)pe->v;
+    asm_diff_fixups = f;
+}
+
+static void asm_resolve_diff_fixups(TCCState *s1)
+{
+    while (asm_diff_fixups) {
+        AsmDiffFixup *f = asm_diff_fixups;
+        ElfSym *e1 = elfsym(f->sym);
+        ElfSym *e2 = elfsym(f->sym2);
+        int64_t v;
+        int i;
+
+        asm_diff_fixups = f->next;
+        if (!e1 || !e2
+            || e1->st_shndx == SHN_UNDEF || e2->st_shndx == SHN_UNDEF
+            || e1->st_shndx != e2->st_shndx) {
+            const char *n1 = get_tok_str(f->sym->v, NULL);
+            const char *n2 = get_tok_str(f->sym2->v, NULL);
+            tcc_free(f);
+            tcc_error("invalid operation with label: '%s' - '%s'", n1, n2);
+        }
+        v = f->addend + (int64_t)e1->st_value - (int64_t)e2->st_value;
+        if (f->sec->sh_type != SHT_NOBITS)
+            for (i = 0; i < f->size; i++)
+                f->sec->data[f->offset + i] = (v >> (i * 8)) & 0xff;
+        tcc_free(f);
+    }
+}
 
 static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global);
 static Sym* asm_new_label(TCCState *s1, int label, int is_local);
@@ -146,6 +205,8 @@ static void asm_expr_unary(TCCState *s1, ExprValue *pe)
     uint64_t n;
     const char *p;
 
+    pe->sym2 = NULL;
+    pe->localref = 0;
     switch(tok) {
     case TOK_PPNUM:
         p = tokc.str.data;
@@ -170,6 +231,7 @@ static void asm_expr_unary(TCCState *s1, ExprValue *pe)
 	    pe->v = 0;
 	    pe->sym = sym;
 	    pe->pcrel = 0;
+	    pe->localref = 1;
         } else if (*p == '\0') {
             pe->v = n;
             pe->sym = NULL;
@@ -230,6 +292,22 @@ static void asm_expr_unary(TCCState *s1, ExprValue *pe)
 		pe->pcrel = 0;
             }
             next();
+            if (tok == '@') {
+                /* symbol reference suffix, e.g. 'printf@PLT' */
+                const char *suffix;
+                next();
+                if (tok < TOK_IDENT)
+                    expect("relocation suffix");
+                suffix = get_tok_str(tok, NULL);
+                if (strcasecmp(suffix, "plt") == 0) {
+                    /* TCC already emits a PLT32 relocation for calls and
+                       jumps to symbols that are not local to the current
+                       section, so this needs no extra handling. */
+                } else {
+                    tcc_error("unsupported relocation suffix '@%s'", suffix);
+                }
+                next();
+            }
         } else {
             tcc_error("bad expression syntax [%s]", get_tok_str(tok, &tokc));
         }
@@ -250,7 +328,7 @@ static void asm_expr_prod(TCCState *s1, ExprValue *pe)
             break;
         next();
         asm_expr_unary(s1, &e2);
-        if (pe->sym || e2.sym)
+        if (pe->sym || e2.sym || pe->sym2 || e2.sym2)
             tcc_error("invalid operation with label");
         switch(op) {
         case '*':
@@ -291,7 +369,7 @@ static void asm_expr_logic(TCCState *s1, ExprValue *pe)
             break;
         next();
         asm_expr_prod(s1, &e2);
-        if (pe->sym || e2.sym)
+        if (pe->sym || e2.sym || pe->sym2 || e2.sym2)
             tcc_error("invalid operation with label");
         switch(op) {
         case '&':
@@ -320,6 +398,8 @@ static inline void asm_expr_sum(TCCState *s1, ExprValue *pe)
             break;
         next();
         asm_expr_logic(s1, &e2);
+        if (pe->sym2 || e2.sym2)
+            goto cannot_relocate;
         if (op == '+') {
             if (pe->sym != NULL && e2.sym != NULL)
                 goto cannot_relocate;
@@ -339,6 +419,15 @@ static inline void asm_expr_sum(TCCState *s1, ExprValue *pe)
 		ElfSym *esym1, *esym2;
 		esym1 = elfsym(pe->sym);
 		esym2 = elfsym(e2.sym);
+		if (asm_defer_diff && pe->sym
+		    && (pe->localref || e2.localref)
+		    && ((!esym1 || esym1->st_shndx == SHN_UNDEF)
+		        || (!esym2 || esym2->st_shndx == SHN_UNDEF))) {
+		    /* neither label is usable yet (forward reference);
+		       remember the pair and patch after assembly */
+		    pe->sym2 = e2.sym;
+		    continue;
+		}
 		if (!esym2)
 		    goto cannot_relocate;
 		if (esym1 && esym1->st_shndx == esym2->st_shndx
@@ -374,7 +463,7 @@ static inline void asm_expr_cmp(TCCState *s1, ExprValue *pe)
             break;
         next();
         asm_expr_sum(s1, &e2);
-        if (pe->sym || e2.sym)
+        if (pe->sym || e2.sym || pe->sym2 || e2.sym2)
             tcc_error("invalid operation with label");
         switch(op) {
 	case TOK_EQ:
@@ -515,6 +604,23 @@ static void pop_section(TCCState *s1)
     use_section1(s1, section_stack[--nb_section_stack]);
 }
 
+/* GAS picks a section type from the section name when '.section' does
+   not name one explicitly (see GAS docs, "Section": ELF Version). */
+static int asm_default_section_type(const char *name)
+{
+    if (!strncmp(name, ".note", 5))
+        return SHT_NOTE;
+    if (!strncmp(name, ".preinit_array", 14))
+        return SHT_PREINIT_ARRAY;
+    if (!strncmp(name, ".init_array", 11))
+        return SHT_INIT_ARRAY;
+    if (!strncmp(name, ".fini_array", 11))
+        return SHT_FINI_ARRAY;
+    if (!strncmp(name, ".bss", 4) || !strncmp(name, ".tbss", 5))
+        return SHT_NOBITS;
+    return SHT_PROGBITS;
+}
+
 static void asm_parse_directive(TCCState *s1, int global)
 {
     int n, offset, v, size, tok1, c;
@@ -529,6 +635,10 @@ static void asm_parse_directive(TCCState *s1, int global)
     case TOK_ASMDIR_p2align:
     case TOK_ASMDIR_skip:
     case TOK_ASMDIR_space:
+    case TOK_ASMDIR_zero:
+        {
+        int is_align, max_skip = -1;
+
         tok1 = tok;
         next();
         n = asm_int_expr(s1);
@@ -539,7 +649,8 @@ static void asm_parse_directive(TCCState *s1, int global)
             n = 1 << n;
             tok1 = TOK_ASMDIR_align;
         }
-        if (tok1 == TOK_ASMDIR_align || tok1 == TOK_ASMDIR_balign) {
+        is_align = (tok1 == TOK_ASMDIR_align || tok1 == TOK_ASMDIR_balign);
+        if (is_align) {
             if (n <= 0 || (n & (n-1)) != 0)
                 tcc_error("alignment must be a positive power of two");
             offset = (ind + n - 1) & -n;
@@ -556,7 +667,21 @@ static void asm_parse_directive(TCCState *s1, int global)
         v = 0;
         if (tok == ',') {
             next();
-            v = asm_int_expr(s1), c = 0;
+            /* the fill value may be omitted (two commas in a row), in
+               which case code sections keep being filled with nops --
+               see GAS docs, ".p2align" */
+            if (tok != ',' && tok != ';' && tok != TOK_LINEFEED)
+                v = asm_int_expr(s1), c = 0;
+            if (is_align && tok == ',') {
+                /* max-skip: if aligning would need more than that many
+                   bytes, do not align at all */
+                next();
+                max_skip = asm_int_expr(s1);
+            }
+        }
+        if (max_skip >= 0 && size > max_skip)
+            size = 0;
+        goto zero_pad;
         }
     zero_pad:
 	if ((uint64_t)ind + size >= 1<<30)
@@ -618,8 +743,21 @@ static void asm_parse_directive(TCCState *s1, int global)
         next();
         for(;;) {
             ExprValue e;
+            asm_defer_diff = 1;
             asm_expr(s1, &e);
-            if (sec->sh_type != SHT_NOBITS) {
+            asm_defer_diff = 0;
+            if (e.sym2) {
+                /* 'a - b' with a not-yet-defined label: emit zeroes now
+                   and patch the value once assembly is complete */
+                int i;
+                if (sec->sh_type != SHT_NOBITS) {
+                    asm_defer_expr(sec, ind, size, &e);
+                    for (i = 0; i < size; i++)
+                        g(0);
+                } else {
+                    ind += size;
+                }
+            } else if (sec->sh_type != SHT_NOBITS) {
                 if (size == 4) {
                     gen_expr32(&e);
 #if PTR_SIZE == 8
@@ -896,6 +1034,8 @@ static void asm_parse_directive(TCCState *s1, int global)
             char sname[256];
 	    int old_nb_section = s1->nb_sections;
             int flags = SHF_ALLOC;
+            int sh_type = -1;
+            int entsize = -1;
 
 	    tok1 = tok;
             /* XXX: support more options */
@@ -910,22 +1050,59 @@ static void asm_parse_directive(TCCState *s1, int global)
             }
             if (tok == ',') {
                 const char *p;
-                /* skip section options */
+                /* section flags, see GAS docs "Section": ELF version */
                 next();
                 if (tok != TOK_STR)
                     expect("string constant");
+                flags = 0;
                 for (p = tokc.str.data; *p; ++p) {
-                    if (*p == 'w')
-                        flags |= SHF_WRITE;
-                    if (*p == 'x')
-                        flags |= SHF_EXECINSTR;
+                    switch (*p) {
+                    case 'a': flags |= SHF_ALLOC; break;
+                    case 'w': flags |= SHF_WRITE; break;
+                    case 'x': flags |= SHF_EXECINSTR; break;
+                    case 'M': flags |= SHF_MERGE; break;
+                    case 'S': flags |= SHF_STRINGS; break;
+                    case 'T': flags |= SHF_TLS; break;
+                    case 'G': flags |= SHF_GROUP; break;
+                    default: /* d, e, o, E, R, ?, +, -: not supported */
+                        break;
+                    }
                 }
                 next();
                 if (tok == ',') {
+                    /* section type: @progbits, @nobits, ... */
                     next();
                     if (tok == '@' || tok == '%')
                         next();
+                    if (tok >= TOK_IDENT) {
+                        const char *tname = get_tok_str(tok, NULL);
+                        if (!strcmp(tname, "nobits"))
+                            sh_type = SHT_NOBITS;
+                        else if (!strcmp(tname, "progbits"))
+                            sh_type = SHT_PROGBITS;
+                        else if (!strcmp(tname, "note"))
+                            sh_type = SHT_NOTE;
+                        else if (!strcmp(tname, "init_array"))
+                            sh_type = SHT_INIT_ARRAY;
+                        else if (!strcmp(tname, "fini_array"))
+                            sh_type = SHT_FINI_ARRAY;
+                        else if (!strcmp(tname, "preinit_array"))
+                            sh_type = SHT_PREINIT_ARRAY;
+                    }
                     next();
+                    if (tok == ',') {
+                        /* entry size (M/S/E), or a group/symbol name */
+                        next();
+                        if (tok == TOK_PPNUM)
+                            entsize = asm_int_expr(s1);
+                        else
+                            next();
+                        /* GroupName linkage, section index, ... */
+                        while (tok == ',') {
+                            next();
+                            next();
+                        }
+                    }
                 }
             }
             last_text_section = cur_text_section;
@@ -943,6 +1120,16 @@ static void asm_parse_directive(TCCState *s1, int global)
                 if (!strcmp(sname, ".init") || !strcmp(sname, ".fini"))
                     flags |= SHF_EXECINSTR;
 	        cur_text_section->sh_flags = flags;
+                if (sh_type < 0)
+                    sh_type = asm_default_section_type(sname);
+                cur_text_section->sh_type = sh_type;
+                if (entsize < 0
+                    && (sh_type == SHT_INIT_ARRAY
+                        || sh_type == SHT_FINI_ARRAY
+                        || sh_type == SHT_PREINIT_ARRAY))
+                    entsize = PTR_SIZE; /* as GAS does */
+                if (entsize > 0)
+                    cur_text_section->sh_entsize = entsize;
             }
         }
         break;
@@ -1056,6 +1243,110 @@ static void asm_parse_directive(TCCState *s1, int global)
 	    next();
 	}
 	break;
+    case TOK_ASMDIR_local:
+        /* GAS docs "Local": mark the symbols as local.  A following
+           .comm then allocates them in .bss instead of as a common. */
+        do {
+            Sym *sym;
+            next();
+            if (tok < TOK_IDENT)
+                expect("identifier");
+            sym = get_asm_sym(tok, NULL);
+            sym->a.asmlocal = 1;
+            sym->type.t |= VT_STATIC;
+            update_storage(sym);
+            next();
+        } while (tok == ',');
+        break;
+    case TOK_ASMDIR_comm:
+    case TOK_ASMDIR_lcomm:
+        {
+            Sym *sym;
+            ElfSym *esym;
+            int is_lcomm = (tok == TOK_ASMDIR_lcomm);
+            int label, align;
+
+            next();
+            if (tok < TOK_IDENT)
+                expect("identifier");
+            label = tok;
+            sym = get_asm_sym(label, NULL);
+            next();
+            skip(',');
+            size = asm_int_expr(s1);
+            if (size < 0)
+                tcc_error("size must not be negative");
+            /* GAS docs "Comm": for ELF the third argument is the desired
+               alignment given as a byte boundary. */
+            align = 1;
+            if (tok == ',') {
+                next();
+                align = asm_int_expr(s1);
+                if (align <= 0 || (align & (align - 1)) != 0)
+                    tcc_error("alignment must be a positive power of two");
+            }
+            if (is_lcomm || sym->a.asmlocal) {
+                /* allocate in .bss */
+                Section *bs = bss_section;
+                if (cur_text_section == bs)
+                    bs->data_offset = ind;
+                if (bs->sh_addralign < align)
+                    bs->sh_addralign = align;
+                offset = (bs->data_offset + align - 1) & -align;
+                bs->data_offset = offset + size;
+                if (cur_text_section == bs)
+                    ind = bs->data_offset;
+                sym = asm_new_label1(s1, label, 0, bs->sh_num, offset);
+                sym->type.t |= VT_STATIC;
+            } else {
+                sym = asm_new_label1(s1, label, 0, SHN_COMMON, align);
+                sym->type.t &= ~VT_STATIC;
+            }
+            update_storage(sym);
+            esym = elfsym(sym);
+            esym->st_size = size;
+            esym->st_info = ELFW(ST_INFO)(ELFW(ST_BIND)(esym->st_info),
+                                          STT_OBJECT);
+        }
+        break;
+    case TOK_ASMDIR_uleb128:
+    case TOK_ASMDIR_sleb128:
+        /* GAS docs "Uleb128"/"Sleb128": (un)signed little endian base 128 */
+        {
+            int is_signed = (tok == TOK_ASMDIR_sleb128);
+            next();
+            for(;;) {
+                ExprValue e;
+                int64_t val;
+                int more;
+
+                asm_expr(s1, &e);
+                if (e.sym)
+                    expect("constant");
+                val = (int64_t)e.v;
+                do {
+                    unsigned char b = val & 0x7f;
+                    if (is_signed) {
+                        val >>= 7;
+                        more = !((val == 0 && !(b & 0x40))
+                                 || (val == -1 && (b & 0x40)));
+                    } else {
+                        val = (int64_t)((uint64_t)val >> 7);
+                        more = val != 0;
+                    }
+                    if (more)
+                        b |= 0x80;
+                    if (sec->sh_type != SHT_NOBITS)
+                        g(b);
+                    else
+                        ind++;
+                } while (more);
+                if (tok != ',')
+                    break;
+                next();
+            }
+        }
+        break;
     default:
         tcc_error("unknown assembler directive '.%s'", get_tok_str(tok, NULL));
         break;
@@ -1088,6 +1379,19 @@ static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global)
 #endif
         if (tok >= TOK_ASMDIR_FIRST && tok <= TOK_ASMDIR_LAST) {
             asm_parse_directive(s1, global);
+        } else if (tok >= TOK_IDENT
+                   && !memcmp(get_tok_str(tok, NULL), ".cfi_", 5)) {
+            /* Call Frame Information.  TCC does not generate unwind
+               tables, so these are accepted and dropped.  Warn once per
+               file: the resulting object has no .eh_frame, hence no
+               unwinding/backtrace information for this code. */
+            if (!warned_cfi) {
+                warned_cfi = 1;
+                tcc_warning("ignoring .cfi_* directives:"
+                            " no unwind information will be generated");
+            }
+            while (tok != ';' && tok != TOK_LINEFEED && tok != TOK_EOF)
+                next();
         } else if (tok == TOK_PPNUM) {
             const char *p;
             int n;
@@ -1131,6 +1435,7 @@ ST_FUNC int tcc_assemble(TCCState *s1, int do_preprocess)
 {
     int ret;
     tcc_debug_start(s1);
+    warned_cfi = 0;
     /* default section is text */
     nb_section_stack = 0;
     cur_text_section = text_section;
@@ -1138,6 +1443,7 @@ ST_FUNC int tcc_assemble(TCCState *s1, int do_preprocess)
     nocode_wanted = 0;
     ret = tcc_assemble_internal(s1, do_preprocess, 1);
     cur_text_section->data_offset = ind;
+    asm_resolve_diff_fixups(s1);
     tcc_debug_end(s1);
     return ret;
 }
@@ -1159,6 +1465,9 @@ static void tcc_assemble_inline(TCCState *s1, const char *str, int len, int glob
     memcpy(file->buffer, str, len);
     macro_ptr = NULL;
     tcc_assemble_internal(s1, 0, global);
+    cur_text_section->data_offset = ind;
+    asm_resolve_diff_fixups(s1);
+    ind = cur_text_section->data_offset;
     tcc_close();
 
 #if !defined(TCC_TARGET_RISCV64) && !defined(TCC_TARGET_X86_64)

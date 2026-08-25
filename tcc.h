@@ -507,7 +507,8 @@ struct SymAttr {
     dllimport   : 1,
     addrtaken   : 1,
     nodebug     : 1,
-    xxxx        : 2; /* not used */
+    asmlocal    : 1, /* asm .local symbol (for .comm) */
+    xxxx        : 1; /* not used */
 };
 
 /* function attributes or temporary attributes for parsing */
@@ -700,6 +701,9 @@ typedef struct CachedInclude {
 typedef struct ExprValue {
     uint64_t v;
     Sym *sym;
+    Sym *sym2; /* subtracted symbol, when 'sym - sym2' cannot be resolved
+                  yet (forward local labels); patched after assembly */
+    int localref; /* value came from a numeric local label ref (1f/1b) */
     int pcrel;
 } ExprValue;
 

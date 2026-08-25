@@ -483,6 +483,27 @@ static void parse_operand(TCCState *s1, Operand *op)
     op->type |= indir;
 }
 
+#if SHT_RELX == SHT_RELA
+/* find the relocation covering OFFSET in section SEC, if any */
+static ElfW_Rel *asm_find_reloc(Section *sec, int offset)
+{
+    Section *sr = sec->reloc;
+    ElfW_Rel *rel;
+
+    if (!sr)
+        return NULL;
+    rel = (ElfW_Rel *)(sr->data + sr->data_offset);
+    while ((uint8_t *)rel > sr->data) {
+        --rel;
+        if (rel->r_offset == (addr_t)offset)
+            return rel;
+        if (rel->r_offset < (addr_t)offset)
+            break;
+    }
+    return NULL;
+}
+#endif
+
 /* XXX: unify with C code output ? */
 ST_FUNC void gen_expr32(ExprValue *pe)
 {
@@ -757,7 +778,7 @@ again:
 	        s++;
 	      }
         } else if (it == OPC_SHIFT) {
-            if (!(opcode >= pa->sym && opcode < pa->sym + 7*NBWLX))
+            if (!(opcode >= pa->sym && opcode < pa->sym + 8*NBWLX))
                 continue;
             s = (opcode - pa->sym) % NBWLX;
         } else if (it == OPC_TEST) {
@@ -1095,9 +1116,10 @@ again:
     g(v);
 
     if (OPCT_IS(pa->instr_type, OPC_SHIFT)) {
-        reg = (opcode - pa->sym) / NBWLX;
-        if (reg == 6)
-            reg = 7;
+        /* token order is rol,ror,rcl,rcr,shl,shr,sar,sal; sar is group-2
+           /7 and sal is just another name for shl (/4) */
+        static const uint8_t shift_group[8] = { 0, 1, 2, 3, 4, 5, 7, 4 };
+        reg = shift_group[(opcode - pa->sym) / NBWLX];
     } else if (OPCT_IS(pa->instr_type, OPC_ARITH)) {
         reg = (opcode - pa->sym) / NBWLX;
     } else if (OPCT_IS(pa->instr_type, OPC_FARITH)) {
@@ -1162,9 +1184,26 @@ again:
         }
     }
 
-    /* after immediate operands, adjust pc-relative address */
-    if (pc)
-        add32le(cur_text_section->data + pc - 4, pc - ind);
+    /* after immediate operands, adjust pc-relative address: the CPU
+       counts %rip from the end of the whole instruction, but the
+       displacement was emitted before the immediates */
+    if (pc) {
+        int adj = pc - ind;
+#if SHT_RELX == SHT_RELA
+        /* When a relocation was emitted for the displacement, the
+           correction must go into its addend: TCC leaves the stored
+           displacement at zero in that case and both TCC's own linker
+           and a standard ELF linker take the addend into account.
+           Without this, e.g. 'movl $1, sym(%rip)' ends up pointing 4
+           bytes past sym once linked by another linker. */
+        ElfW_Rel *rel = asm_find_reloc(cur_text_section, pc - 4);
+        if (rel) {
+            rel->r_addend += adj;
+            return;
+        }
+#endif
+        add32le(cur_text_section->data + pc - 4, adj);
+    }
 }
 
 /* return the constraint priority (we allocate first the lowest
