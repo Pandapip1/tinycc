@@ -1145,6 +1145,11 @@ static int tcc_add_binary(TCCState *s1, int flags, const char *filename, int fd)
     }
 
 #elif defined TCC_TARGET_PE
+    case AFF_BINTYPE_COFF:
+        /* a PE-COFF relocatable object, e.g. from GNU as / MinGW binutils */
+        ret = pe_load_obj_file(s1, fd, 0);
+        break;
+
     default:
         if (pe_load_file(s1, fd, filename))
             ret = FILE_NOT_RECOGNIZED;

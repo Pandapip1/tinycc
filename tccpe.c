@@ -2272,6 +2272,663 @@ ST_FUNC int pe_load_file(struct TCCState *s1, int fd, const char *filename)
     return ret;
 }
 
+/* ------------------------------------------------------------- */
+/* PE-COFF relocatable object file reader.
+ *
+ * This lets the win32 targets consume genuine ".o" files produced by GNU as /
+ * MinGW binutils, by translating them into tcc's internal, ELF-shaped
+ * representation.  It is input-only: tcc still *writes* ELF objects for -c
+ * (libtcc.c, "always elf for objects").
+ *
+ * References, cited per item below:
+ *   [PECOFF] Microsoft PE and COFF Specification, sections 3 (COFF File
+ *            Header), 4 / 4.1 (Section Table, Section Flags), 5.2.1
+ *            (Relocations - Type Indicators), 5.3 (COFF Relocations),
+ *            5.4 / 5.4.4 / 5.4.5 (COFF Symbol Table, Section Number Values,
+ *            Storage Class), 5.5.5 (Auxiliary Format 5: Section
+ *            Definitions), 5.6 (COFF String Table).
+ *   [BFD]    binutils sources: include/coff/internal.h, include/coff/i386.h,
+ *            include/coff/x86_64.h, include/coff/pe.h,
+ *            include/coff/external.h, bfd/coff-i386.c, bfd/coff-x86_64.c.
+ *
+ * ADDEND MODEL - read this before touching the relocation code.
+ *
+ * COFF relocations are REL-style: the 10-byte relocation record has no addend
+ * field, the addend lives in the section contents at the fixup site
+ * ([PECOFF] 5.3).  That is the same shape as ELF REL, so on i386, where tcc
+ * is a REL target, the stored value is reused as-is.
+ *
+ * What is *not* the same is PC-relative relocations.  PE measures the
+ * displacement from the byte *following* the field, whereas ELF R_386_PC32 /
+ * R_X86_64_PC32 compute S + A - P with P at the *start* of the field.  So the
+ * ELF addend is the stored value minus the field size (minus 4+N for the
+ * x86-64 REL32_N variants, minus 8 for the 64-bit PCRQUAD).  This is exactly
+ * the "*addendp -= 4" that binutils applies under COFF_WITH_PE in
+ * bfd/coff-i386.c:coff_i386_rtype_to_howto and
+ * bfd/coff-x86_64.c:coff_amd64_rtype_to_howto.  It was also verified
+ * empirically: assembling "call _extfunc" with i686-w64-mingw32-as stores
+ * 00000000 at the fixup where the elf32-i386 assembler stores fffffffc.
+ *
+ * On i386 (REL) the bias is folded into the section contents in place.  On
+ * x86-64 (RELA) the whole addend is lifted out of the section contents into
+ * r_addend and the field is zeroed - necessary because tcc's relocate() *adds*
+ * to the field (add32le/add64le), which would otherwise apply it twice.
+ *
+ * Relocation types that are not translated explicitly below are a hard error.
+ * They are never passed through unchanged and never skipped: a numerically
+ * preserved but semantically wrong relocation type produces corrupt output
+ * indistinguishable from correct output, which is the exact failure this
+ * reader exists to make impossible.
+ */
+
+/* COFF file header, [PECOFF] 3.3 / [BFD] include/coff/external.h FILHSZ */
+#define COFF_FILHSZ         20
+#define FH_MACHINE           0  /* WORD  */
+#define FH_NSCNS             2  /* WORD  */
+#define FH_SYMPTR            8  /* DWORD */
+#define FH_NSYMS            12  /* DWORD */
+#define FH_OPTHDR           16  /* WORD  */
+
+/* section table entry, [PECOFF] 4 / [BFD] include/coff/external.h SCNHSZ */
+#define COFF_SCNHSZ         40
+#define SH_NAME              0  /* 8 bytes */
+#define SH_VADDR            12  /* DWORD */
+#define SH_RAWSIZE          16  /* DWORD */
+#define SH_RAWPTR           20  /* DWORD */
+#define SH_RELPTR           24  /* DWORD */
+#define SH_NRELOC           32  /* WORD  */
+#define SH_FLAGS            36  /* DWORD */
+
+/* symbol table entry, [PECOFF] 5.4 / [BFD] include/coff/external.h SYMESZ */
+#define COFF_SYMESZ         18
+#define SY_NAME              0  /* 8 bytes */
+#define SY_VALUE             8  /* DWORD */
+#define SY_SCNUM            12  /* signed WORD */
+#define SY_SCLASS           16  /* BYTE */
+#define SY_NUMAUX           17  /* BYTE */
+
+/* auxiliary section definition record, [PECOFF] 5.5.5 / [BFD]
+   include/coff/external.h "union external_auxent", member x_scn */
+#define AUX_SCN_ASSOC       12  /* WORD, 1-based section number */
+#define AUX_SCN_SELECTION   14  /* BYTE */
+
+/* relocation record, [PECOFF] 5.3 / [BFD] include/coff/external.h RELSZ */
+#define COFF_RELSZ          10
+#define RE_VADDR             0  /* DWORD */
+#define RE_SYMNDX            4  /* DWORD */
+#define RE_TYPE              8  /* WORD  */
+
+/* section numbers, [PECOFF] 5.4.4 / [BFD] include/coff/internal.h */
+#define COFF_N_UNDEF         0
+#define COFF_N_ABS         (-1)
+
+/* storage classes, [PECOFF] 5.4.5 / [BFD] include/coff/internal.h */
+#define COFF_C_EXT           2
+#define COFF_C_STAT          3
+#define COFF_C_LABEL         6
+#define COFF_C_NT_WEAK     105
+#define COFF_C_WEAKEXT     127
+
+/* extra section flags used here, [PECOFF] 4.1 / [BFD] include/coff/pe.h */
+#define IMAGE_SCN_LNK_INFO          0x00000200
+#define IMAGE_SCN_LNK_REMOVE        0x00000800
+#define IMAGE_SCN_LNK_COMDAT        0x00001000
+#define IMAGE_SCN_LNK_NRELOC_OVFL   0x01000000
+#define IMAGE_SCN_ALIGN_MASK        0x00F00000
+#define IMAGE_SCN_ALIGN_SHIFT               20
+
+/* COMDAT selection values, [PECOFF] 5.5.5 / [BFD] include/coff/pe.h */
+#define COFF_COMDAT_EXACT_MATCH      4
+#define COFF_COMDAT_ASSOCIATIVE      5
+
+#if defined TCC_TARGET_I386
+# define R_XXX_NONE R_386_NONE
+#elif defined TCC_TARGET_X86_64
+# define R_XXX_NONE R_X86_64_NONE
+#else
+# define R_XXX_NONE 0
+#endif
+
+typedef struct CoffSection {
+    Section *s;             /* tcc section this one was merged into, or NULL */
+    unsigned long offset;   /* where it landed inside s */
+    unsigned char *hdr;     /* the 40-byte COFF section header */
+    int sym;                /* index of its section symbol, -1 if none */
+    unsigned char comdat;   /* COMDAT selection value, 0 if not a COMDAT */
+    unsigned char keep;     /* selected for merging */
+    unsigned char dup;      /* COMDAT duplicate: dropped, symbols redirected */
+} CoffSection;
+
+/* Resolve a COFF name field: 8 bytes holding either an inline (possibly
+   unterminated) name or, when the first four bytes are zero, an offset into
+   the string table.  [PECOFF] 5.4.1 and 5.6.
+   Section headers cannot use that encoding - their whole 8 bytes are the
+   name - so a long section name is instead written as '/' followed by the
+   decimal string-table offset ([PECOFF] 4, "Name" field); pass IS_SEC to
+   accept that form. */
+static const char *coff_name(unsigned char *field, char *buf,
+                             char *strtab, unsigned long strtab_size, int is_sec)
+{
+    unsigned long off;
+    if (read32le(field) == 0) {
+        off = read32le(field + 4);
+        if (!strtab || off < 4 || off >= strtab_size)
+            return NULL;
+        return strtab + off;
+    }
+    memcpy(buf, field, 8);
+    buf[8] = 0;
+    if (is_sec && buf[0] == '/') {
+        char *e;
+        /* binutils also emits a base64 form, "//", for offsets that do not
+           fit in seven digits; it is not decoded here and must not be
+           mistaken for a decimal offset. */
+        if (buf[1] < '0' || buf[1] > '9')
+            return NULL;
+        off = strtoul(buf + 1, &e, 10);
+        if (*e || off < 4 || off >= strtab_size)
+            return NULL;
+        return strtab + off;
+    }
+    return buf;
+}
+
+/* Translate one COFF relocation type into tcc's internal (ELF) type.
+   Returns the ELF type, or -1 if the type is not handled - the caller then
+   errors out, loudly, naming the numeric type.
+   *pfsize gets the size in bytes of the field being patched (0 for no-ops).
+   PTR is the fixup site, or NULL when the section has no contents.
+   On a RELA target *paddend receives the addend lifted out of the contents;
+   on a REL target *pbias receives the amount to add to the stored value in
+   place.  Exactly one of the two mechanisms is ever used, per target. */
+static int coff_reloc_type(int coff_type, unsigned char *ptr,
+                           addr_t *paddend, int *pbias, int *pfsize)
+{
+    *paddend = 0;
+    *pbias = 0;
+    *pfsize = 0;
+#if defined TCC_TARGET_I386
+    /* i386: tcc is a REL target - the addend stays in the section contents,
+       so only the PC-relative bias has to be folded in.
+       Type numbers: [PECOFF] 5.2.1 "x86 Processors", and [BFD]
+       include/coff/i386.h; semantics from [BFD] bfd/coff-i386.c howto_table
+       and coff_i386_rtype_to_howto. */
+    switch (coff_type) {
+    case 0x0000:
+        /* IMAGE_REL_I386_ABSOLUTE: "The relocation is ignored" ([PECOFF]
+           5.2.1).  R_386_NONE is tcc's no-op.  No field, no addend. */
+        return R_386_NONE;
+    case 0x0006:
+        /* IMAGE_REL_I386_DIR32 (= R_DIR32, [BFD] coff/i386.h): the 32-bit
+           virtual address of the target.  Not PC-relative; 4-byte field;
+           addend stored in the field.  Identical to ELF R_386_32 (S + A), so
+           no bias.  Verified empirically: gas stores the same bytes for
+           pe-i386 dir32 and elf32-i386 R_386_32. */
+        *pfsize = 4;
+        return R_386_32;
+    case 0x0014:
+        /* IMAGE_REL_I386_REL32 (= R_PCRLONG, objdump "DISP32"): 32-bit
+           PC-relative displacement measured from the byte following the
+           4-byte field.  ELF R_386_PC32 is S + A - P with P at the start of
+           the field, so the ELF addend is 4 less than what COFF stores.
+           [BFD] bfd/coff-i386.c coff_i386_rtype_to_howto: "*addendp -= 4"
+           under COFF_WITH_PE. */
+        *pfsize = 4;
+        *pbias = -4;
+        return R_386_PC32;
+    }
+    /* Deliberately unhandled, and therefore hard errors:
+         0x0007 IMAGE_REL_I386_DIR32NB - RVA relative to the image base; tcc
+                has no internal relocation with that meaning.
+         0x000A SECTION, 0x000B SECREL, 0x000C TOKEN, 0x000D SECREL7 -
+                section index / section-relative; no tcc equivalent.
+         0x0001 DIR16, 0x0002 REL16, and the non-PE legacy COFF types 15..19
+                (R_RELBYTE, R_RELWORD, R_RELLONG, R_PCRBYTE, R_PCRWORD from
+                [BFD] coff/i386.h) - not emitted by gas for pe-i386, and
+                mapping them from memory is exactly the guess this reader
+                refuses to make. */
+#elif defined TCC_TARGET_X86_64
+    /* x86-64: tcc is a RELA target, so the addend is lifted out of the
+       section contents into r_addend and the field is zeroed by the caller.
+       Type numbers: [PECOFF] 5.2.1 "x64 Processors", and [BFD]
+       include/coff/x86_64.h; biases from [BFD] bfd/coff-x86_64.c
+       coff_amd64_rtype_to_howto. */
+    if (coff_type != 0 && !ptr)
+        return -1;      /* needs to read an addend, but there are no contents */
+    switch (coff_type) {
+    case 0:
+        /* IMAGE_REL_AMD64_ABSOLUTE: ignored ([PECOFF] 5.2.1). */
+        return R_X86_64_NONE;
+    case 1:
+        /* IMAGE_REL_AMD64_ADDR64 (= R_AMD64_DIR64): 64-bit VA, not
+           PC-relative, 8-byte field.  ELF R_X86_64_64 (S + A). */
+        *pfsize = 8;
+        *paddend = (addr_t)read64le(ptr);
+        return R_X86_64_64;
+    case 2:
+        /* IMAGE_REL_AMD64_ADDR32 (= R_AMD64_DIR32): 32-bit VA, 4-byte field.
+           The [BFD] howto complains on *bitfield* overflow (unsigned), which
+           matches ELF R_X86_64_32, not the sign-extending R_X86_64_32S. */
+        *pfsize = 4;
+        *paddend = (addr_t)read32le(ptr);
+        return R_X86_64_32;
+    case 4: /* IMAGE_REL_AMD64_REL32   (= R_AMD64_PCRLONG)   */
+    case 5: /* IMAGE_REL_AMD64_REL32_1 (= R_AMD64_PCRLONG_1) */
+    case 6: /* IMAGE_REL_AMD64_REL32_2 */
+    case 7: /* IMAGE_REL_AMD64_REL32_3 */
+    case 8: /* IMAGE_REL_AMD64_REL32_4 */
+    case 9: /* IMAGE_REL_AMD64_REL32_5 */
+        /* 32-bit PC-relative displacement from the byte following the 4-byte
+           field (REL32), or from N bytes beyond that (REL32_N, N = type - 4).
+           ELF R_X86_64_PC32 measures from the start of the field, hence
+           -4-N.  [BFD] bfd/coff-x86_64.c coff_amd64_rtype_to_howto:
+           "*addendp -= (bfd_vma)(rel->r_type - R_AMD64_PCRLONG)" followed by
+           "*addendp -= 4". */
+        *pfsize = 4;
+        *paddend = (addr_t)(int64_t)((int)read32le(ptr) - 4 - (coff_type - 4));
+        return R_X86_64_PC32;
+    case 14:
+        /* R_AMD64_PCRQUAD: a gas extension, named "R_X86_64_PC64" in the
+           [BFD] bfd/coff-x86_64.c howto table - 64-bit PC-relative, 8-byte
+           field, bias -8 ("if (rel->r_type == R_AMD64_PCRQUAD) *addendp -=
+           8" in coff_amd64_rtype_to_howto). */
+        *pfsize = 8;
+        *paddend = (addr_t)(read64le(ptr) - 8);
+        return R_X86_64_PC64;
+    }
+    /* Deliberately unhandled, and therefore hard errors:
+         3  IMAGE_REL_AMD64_ADDR32NB - RVA; no tcc equivalent.
+         10 SECTION, 11 SECREL, 12 SECREL7, 13 TOKEN - section index /
+            section-relative; no tcc equivalent.
+         15..20 - non-PE legacy COFF types from [BFD] coff/x86_64.h. */
+#else
+    /* Other PE targets (arm-wince, arm64-win32) use different relocation
+       numbering, which this reader does not implement; every type errors. */
+    (void)ptr;
+#endif
+    return -1;
+}
+
+ST_FUNC int pe_load_obj_file(TCCState *s1, int fd, unsigned long file_offset)
+{
+    unsigned char fh[COFF_FILHSZ];
+    unsigned char *shdrs = NULL, *symtab = NULL, *relocs = NULL;
+    char *strtab = NULL;
+    unsigned long strtab_size = 0, symptr, size;
+    int nsec = 0, nsyms = 0, i, j, ret = -1;
+    CoffSection *sec = NULL;
+    int *old_to_new = NULL;
+    char nbuf[9], nbuf2[9];
+
+    if (!read_mem(fd, file_offset, fh, COFF_FILHSZ))
+        return tcc_error_noabort("invalid PE-COFF object file (truncated header)");
+    if (read16le(fh + FH_MACHINE) != IMAGE_FILE_MACHINE)
+        return tcc_error_noabort("PE-COFF object file for machine 0x%04x, expected 0x%04x",
+            (unsigned)read16le(fh + FH_MACHINE), (unsigned)IMAGE_FILE_MACHINE);
+
+    nsec = read16le(fh + FH_NSCNS);
+    nsyms = read32le(fh + FH_NSYMS);
+    symptr = read32le(fh + FH_SYMPTR);
+    if (nsec <= 0)
+        return tcc_error_noabort("PE-COFF object file has no sections");
+    if (nsyms < 0)
+        return tcc_error_noabort("PE-COFF object file has a bad symbol count");
+
+    shdrs = load_data(fd, file_offset + COFF_FILHSZ + read16le(fh + FH_OPTHDR),
+                      (unsigned long)nsec * COFF_SCNHSZ);
+    sec = tcc_mallocz(sizeof(CoffSection) * (nsec + 1));
+    for (i = 1; i <= nsec; i++) {
+        sec[i].hdr = shdrs + (i - 1) * COFF_SCNHSZ;
+        sec[i].sym = -1;
+    }
+
+    if (!symptr)
+        nsyms = 0;      /* no symbol table: nothing to resolve against */
+    if (nsyms) {
+        unsigned char sz[4];
+        symtab = load_data(fd, file_offset + symptr,
+                           (unsigned long)nsyms * COFF_SYMESZ);
+        /* the string table follows the symbol table and begins with its own
+           total size in bytes ([PECOFF] 5.6) */
+        if (read_mem(fd, file_offset + symptr + nsyms * COFF_SYMESZ, sz, 4)
+            && read32le(sz) >= 4) {
+            strtab_size = read32le(sz);
+            strtab = load_data(fd, file_offset + symptr + nsyms * COFF_SYMESZ,
+                               strtab_size);
+            strtab[strtab_size - 1] = 0;  /* a corrupt table cannot run off */
+        }
+    }
+    old_to_new = tcc_mallocz((nsyms + 1) * sizeof(int));
+
+    /* --- pass 1: locate section symbols and COMDAT selections ---------- */
+    for (i = 0; i < nsyms; ) {
+        unsigned char *sy = symtab + i * COFF_SYMESZ;
+        int numaux = sy[SY_NUMAUX];
+        int scnum = (int16_t)read16le(sy + SY_SCNUM);
+        if (sy[SY_SCLASS] == COFF_C_STAT && numaux >= 1 && i + numaux < nsyms
+            && scnum > 0 && scnum <= nsec && read32le(sy + SY_VALUE) == 0
+            && sec[scnum].sym < 0) {
+            const char *n1 = coff_name(sy + SY_NAME, nbuf, strtab, strtab_size, 0);
+            const char *n2 = coff_name(sec[scnum].hdr + SH_NAME, nbuf2, strtab, strtab_size, 1);
+            /* a section definition symbol carries the section's own name
+               ([PECOFF] 5.5.5); an ordinary C_STAT local does not */
+            if (n1 && n2 && 0 == strcmp(n1, n2)) {
+                sec[scnum].sym = i;
+                if (read32le(sec[scnum].hdr + SH_FLAGS) & IMAGE_SCN_LNK_COMDAT)
+                    sec[scnum].comdat = sy[COFF_SYMESZ + AUX_SCN_SELECTION];
+            }
+        }
+        i += 1 + numaux;
+    }
+
+    /* --- pass 2: decide which sections to keep ------------------------- */
+    for (i = 1; i <= nsec; i++) {
+        unsigned flags = read32le(sec[i].hdr + SH_FLAGS);
+        const char *name = coff_name(sec[i].hdr + SH_NAME, nbuf, strtab, strtab_size, 1);
+        int sel = sec[i].comdat;
+
+        if (!name) {
+            tcc_error_noabort("PE-COFF object: bad name for section %d", i);
+            goto the_end;
+        }
+        /* linker directives (.drectve) and other non-contributing sections */
+        if (flags & (IMAGE_SCN_LNK_REMOVE | IMAGE_SCN_LNK_INFO))
+            continue;
+        /* debug information in COFF form is not consumed */
+        if (0 == strncmp(name, ".debug", 6) || 0 == strncmp(name, ".stab", 5))
+            continue;
+
+        if (sel) {
+            const char *key = NULL;
+            if (sel == COFF_COMDAT_ASSOCIATIVE)
+                continue;   /* resolved in pass 3, once the rest are decided */
+            if (sel > COFF_COMDAT_EXACT_MATCH) {
+                /* IMAGE_COMDAT_SELECT_LARGEST, and anything unknown, would
+                   need deferred selection; refuse loudly rather than guess. */
+                tcc_error_noabort("PE-COFF object: unsupported COMDAT selection %d"
+                                  " for section '%s'", sel, name);
+                goto the_end;
+            }
+            /* SELECT_NODUPLICATES / ANY / SAME_SIZE / EXACT_MATCH are all
+               handled as keep-the-first, keyed on the COMDAT symbol - the
+               first external symbol defined in the section ([PECOFF] 5.5.5).
+               For SAME_SIZE and EXACT_MATCH that differs from a real linker
+               only in the diagnostics it would emit, not in what gets
+               linked. */
+            for (j = 0; j < nsyms; j += 1 + symtab[j * COFF_SYMESZ + SY_NUMAUX]) {
+                unsigned char *sy = symtab + j * COFF_SYMESZ;
+                if (sy[SY_SCLASS] == COFF_C_EXT
+                    && (int16_t)read16le(sy + SY_SCNUM) == i) {
+                    key = coff_name(sy + SY_NAME, nbuf2, strtab, strtab_size, 0);
+                    break;
+                }
+            }
+            if (key && find_elf_sym(symtab_section, key)) {
+                sec[i].dup = 1;
+                continue;
+            }
+        }
+        sec[i].keep = 1;
+    }
+    /* pass 3: an associative COMDAT lives or dies with the section it names */
+    for (i = 1; i <= nsec; i++) {
+        int assoc;
+        if (sec[i].comdat != COFF_COMDAT_ASSOCIATIVE)
+            continue;
+        if (sec[i].sym < 0) {
+            tcc_error_noabort("PE-COFF object: associative COMDAT section %d has"
+                              " no section symbol", i);
+            goto the_end;
+        }
+        assoc = read16le(symtab + (sec[i].sym + 1) * COFF_SYMESZ + AUX_SCN_ASSOC);
+        if (assoc < 1 || assoc > nsec || sec[assoc].comdat == COFF_COMDAT_ASSOCIATIVE) {
+            tcc_error_noabort("PE-COFF object: associative COMDAT section %d refers"
+                              " to bad section %d", i, assoc);
+            goto the_end;
+        }
+        sec[i].keep = sec[assoc].keep;
+        sec[i].dup = sec[assoc].dup;
+    }
+
+    /* --- pass 4: merge the kept sections into tcc's sections ----------- */
+    for (i = 1; i <= nsec; i++) {
+        unsigned flags, align;
+        int sh_type, sh_flags;
+        const char *name;
+        Section *s = NULL;
+
+        if (!sec[i].keep)
+            continue;
+        flags = read32le(sec[i].hdr + SH_FLAGS);
+        name = coff_name(sec[i].hdr + SH_NAME, nbuf, strtab, strtab_size, 1);
+        size = read32le(sec[i].hdr + SH_RAWSIZE);
+
+        sh_type = (flags & IMAGE_SCN_CNT_UNINITIALIZED_DATA)
+                  ? SHT_NOBITS : SHT_PROGBITS;
+        sh_flags = SHF_ALLOC;
+        if (flags & IMAGE_SCN_MEM_WRITE)
+            sh_flags |= SHF_WRITE;
+        if (flags & IMAGE_SCN_MEM_EXECUTE)
+            sh_flags |= SHF_EXECINSTR;
+        /* the alignment is a power of two, biased by one, in bits 20..23;
+           zero means "unspecified" ([PECOFF] 4.1).  binutils defaults x86
+           COFF to 4 bytes (COFF_DEFAULT_SECTION_ALIGNMENT_POWER, [BFD]
+           bfd/coff-i386.c). */
+        align = (flags & IMAGE_SCN_ALIGN_MASK) >> IMAGE_SCN_ALIGN_SHIFT;
+        align = align ? 1u << (align - 1) : 4;
+
+        for (j = 1; j < s1->nb_sections; j++) {
+            if (0 == strcmp(s1->sections[j]->name, name)) {
+                s = s1->sections[j];
+                if (s->sh_type != sh_type) {
+                    tcc_error_noabort("section type conflict: %s %02x <> %02x",
+                                      name, sh_type, s->sh_type);
+                    goto the_end;
+                }
+                break;
+            }
+        }
+        if (!s) {
+            s = new_section(s1, name, sh_type, sh_flags);
+            s->sh_addralign = align;
+        }
+        sec[i].offset = section_add(s, size, align);
+        if (align > s->sh_addralign)
+            s->sh_addralign = align;
+        sec[i].s = s;
+        if (sh_type != SHT_NOBITS && size) {
+            unsigned long ptr = read32le(sec[i].hdr + SH_RAWPTR);
+            if (!ptr) {
+                tcc_error_noabort("PE-COFF object: section '%s' has contents but"
+                                  " no data pointer", name);
+                goto the_end;
+            }
+            lseek(fd, file_offset + ptr, SEEK_SET);
+            if (full_read(fd, s->data + sec[i].offset, size) != (ssize_t)size) {
+                tcc_error_noabort("PE-COFF object: truncated contents for section"
+                                  " '%s'", name);
+                goto the_end;
+            }
+        }
+    }
+
+    /* --- pass 5: symbols ---------------------------------------------- */
+    for (i = 0; i < nsyms; ) {
+        unsigned char *sy = symtab + i * COFF_SYMESZ;
+        int si = i, numaux = sy[SY_NUMAUX];
+        int sclass = sy[SY_SCLASS];
+        int scnum = (int16_t)read16le(sy + SY_SCNUM);
+        addr_t value = read32le(sy + SY_VALUE);
+        unsigned long sym_size = 0;
+        int bind, type = STT_NOTYPE, shndx;
+        const char *name;
+
+        i += 1 + numaux;
+
+        switch (sclass) {
+        case COFF_C_EXT: bind = STB_GLOBAL; break;
+        case COFF_C_STAT:
+        case COFF_C_LABEL: bind = STB_LOCAL; break;
+        case COFF_C_NT_WEAK:
+        case COFF_C_WEAKEXT: bind = STB_WEAK; break;
+        default:
+            /* C_FILE, C_SECTION, and the C_BLOCK/C_FCN/C_AUTO/... debugging
+               and scoping classes carry no linkage information */
+            continue;
+        }
+        name = coff_name(sy + SY_NAME, nbuf, strtab, strtab_size, 0);
+        if (!name || !*name)
+            continue;
+
+        if (scnum > 0) {
+            if (scnum > nsec) {
+                tcc_error_noabort("PE-COFF object: symbol '%s' in bad section %d",
+                                  name, scnum);
+                goto the_end;
+            }
+            if (sec[scnum].dup) {
+                /* COMDAT duplicate: point references at the copy we kept */
+                if (bind != STB_LOCAL)
+                    old_to_new[si] = find_elf_sym(symtab_section, name);
+                continue;
+            }
+            if (!sec[scnum].s)
+                continue;   /* section not loaded: drop the symbol with it */
+            shndx = sec[scnum].s->sh_num;
+            value += sec[scnum].offset;
+            if (sec[scnum].sym == si)
+                type = STT_SECTION;
+        } else if (scnum == COFF_N_UNDEF) {
+            if (value) {
+                /* a COFF common symbol: its size is in n_value ([PECOFF]
+                   5.4.4).  ELF puts the size in st_size and the *alignment*
+                   in st_value (see resolve_common_syms()).  COFF carries no
+                   alignment - GNU as emits it as an "-aligncomm" directive in
+                   .drectve, which is not parsed here - so derive a natural
+                   alignment from the size, capped at the word size. */
+                sym_size = value;
+                value = value >= PTR_SIZE ? PTR_SIZE
+                      : value >= 4 ? 4 : value >= 2 ? 2 : 1;
+                shndx = SHN_COMMON;
+            } else {
+                shndx = SHN_UNDEF;
+                value = 0;
+            }
+        } else if (scnum == COFF_N_ABS) {
+            shndx = SHN_ABS;
+        } else {
+            continue;   /* N_DEBUG and friends */
+        }
+
+        if (bind == STB_WEAK && shndx == SHN_UNDEF)
+            tcc_warning("weak external '%s': the default symbol named by its"
+                        " auxiliary record is ignored", name);
+
+        old_to_new[si] = set_elf_sym(symtab_section, value, sym_size,
+                                     ELFW(ST_INFO)(bind, type), 0, shndx, name);
+    }
+
+    /* --- pass 6: relocations ------------------------------------------ */
+    for (i = 1; i <= nsec; i++) {
+        unsigned long nrel, relptr, vaddr, rawsize;
+        unsigned flags;
+        const char *name;
+        Section *s = sec[i].s;
+
+        if (!s)
+            continue;
+        flags = read32le(sec[i].hdr + SH_FLAGS);
+        nrel = read16le(sec[i].hdr + SH_NRELOC);
+        relptr = read32le(sec[i].hdr + SH_RELPTR);
+        vaddr = read32le(sec[i].hdr + SH_VADDR);
+        rawsize = read32le(sec[i].hdr + SH_RAWSIZE);
+        name = coff_name(sec[i].hdr + SH_NAME, nbuf, strtab, strtab_size, 1);
+        if (!nrel || !relptr)
+            continue;
+        if (flags & IMAGE_SCN_LNK_NRELOC_OVFL) {
+            /* more than 0xffff relocations: the real count sits in the
+               VirtualAddress field of a leading dummy record ([PECOFF] 4.1,
+               IMAGE_SCN_LNK_NRELOC_OVFL, and 5.3) */
+            unsigned char ovfl[COFF_RELSZ];
+            if (!read_mem(fd, file_offset + relptr, ovfl, COFF_RELSZ)
+                || !read32le(ovfl + RE_VADDR)) {
+                tcc_error_noabort("PE-COFF object: bad relocation overflow record"
+                                  " for '%s'", name);
+                goto the_end;
+            }
+            nrel = read32le(ovfl + RE_VADDR) - 1;
+            relptr += COFF_RELSZ;
+        }
+        relocs = load_data(fd, file_offset + relptr, nrel * COFF_RELSZ);
+        for (j = 0; j < (int)nrel; j++) {
+            unsigned char *re = relocs + j * COFF_RELSZ;
+            unsigned long rva = read32le(re + RE_VADDR), off;
+            unsigned long symndx = read32le(re + RE_SYMNDX);
+            int coff_type = read16le(re + RE_TYPE);
+            unsigned char *ptr;
+            addr_t addend;
+            int bias, fsize, elf_type, sym_index;
+
+            /* r_vaddr is the section's own address plus the offset of the
+               item within it ([PECOFF] 5.3); object sections have address 0,
+               but subtract it rather than assume. */
+            if (rva < vaddr || rva - vaddr > rawsize) {
+                tcc_error_noabort("PE-COFF object: relocation for '%s' at 0x%lx is"
+                                  " outside the section", name, rva);
+                goto the_end;
+            }
+            off = rva - vaddr;
+            ptr = s->sh_type != SHT_NOBITS ? s->data + sec[i].offset + off : NULL;
+
+            elf_type = coff_reloc_type(coff_type, ptr, &addend, &bias, &fsize);
+            if (elf_type < 0) {
+                /* Loud, by design.  An untranslated type is never passed
+                   through and never skipped. */
+                tcc_error_noabort("unsupported PE-COFF relocation type %d (0x%02x)"
+                                  " in section '%s' at offset 0x%lx",
+                                  coff_type, coff_type, name, off);
+                goto the_end;
+            }
+            if ((unsigned long)fsize > rawsize - off) {
+                tcc_error_noabort("PE-COFF object: relocation for '%s' at 0x%lx"
+                                  " overruns the section", name, rva);
+                goto the_end;
+            }
+            if (symndx >= (unsigned long)nsyms) {
+                tcc_error_noabort("PE-COFF object: relocation in '%s' names symbol"
+                                  " %lu of %d", name, symndx, nsyms);
+                goto the_end;
+            }
+            sym_index = old_to_new[symndx];
+            if (!sym_index && elf_type != R_XXX_NONE) {
+                tcc_error_noabort("invalid relocation entry in '%s' @ 0x%lx",
+                                  name, off);
+                goto the_end;
+            }
+            off += sec[i].offset;
+            if (fsize && ptr) {
+                if (bias)               /* REL target: fold the bias in place */
+                    add32le(ptr, bias);
+                if (SHT_RELX == SHT_RELA)  /* RELA: the addend moved out */
+                    memset(ptr, 0, fsize);
+            }
+            put_elf_reloca(symtab_section, s, off, elf_type, sym_index, addend);
+        }
+        tcc_free(relocs), relocs = NULL;
+    }
+
+    ret = !s1->nb_errors - 1;
+ the_end:
+    tcc_free(relocs);
+    tcc_free(old_to_new);
+    tcc_free(sec);
+    tcc_free(strtab);
+    tcc_free(symtab);
+    tcc_free(shdrs);
+    return ret;
+}
+
+/* ------------------------------------------------------------- */
 PUB_FUNC int tcc_get_dllexports(const char *filename, char **pp)
 {
     int ret, fd = open(filename, O_RDONLY | O_BINARY);

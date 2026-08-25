@@ -1,0 +1,8 @@
+add=37
+bias=7
+selfptr=1
+textptr=1
+disp32=42
+common=1 5
+bss=1 9
+abs=0x1234
