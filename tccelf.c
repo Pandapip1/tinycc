@@ -3266,6 +3266,24 @@ ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
         if (((struct filehdr*)h)->f_magic == COFF_C67_MAGIC)
             return AFF_BINTYPE_C67;
 #endif
+#ifdef TCC_TARGET_PE
+        /* PE-COFF relocatable object file, as produced by GNU as / MinGW
+           binutils.  Such a file begins directly with the 20-byte COFF file
+           header, whose first field is the machine id; PE *images* begin with
+           the "MZ" DOS stub instead, so there is no ambiguity.  Objects never
+           carry an optional header, which rules out the remaining cases.
+           Machine ids: PE/COFF spec 3.3.1 "Machine Types"
+           (IMAGE_FILE_MACHINE_I386 0x014c, IMAGE_FILE_MACHINE_AMD64 0x8664);
+           see also binutils include/coff/i386.h (I386MAGIC) and
+           include/coff/x86_64.h (AMD64MAGIC). */
+        if (size >= 20) {
+            unsigned char *p = (unsigned char *)h;
+            unsigned machine = read16le(p);
+            unsigned opthdr = read16le(p + 16);
+            if ((machine == 0x014c || machine == 0x8664) && opthdr == 0)
+                return AFF_BINTYPE_COFF;
+        }
+#endif
     }
     return 0;
 }
@@ -3618,6 +3636,24 @@ static int read_ar_header(int fd, int offset, ArchiveHeader *hdr)
     return len;
 }
 
+/* load one archive member at FILE_OFFSET.  TYPE is the value previously
+   returned by tcc_object_type() for that member, or 0 if unknown (then it is
+   determined here).  On win32 targets a member may be a PE-COFF object
+   instead of an ELF one; everything else is rejected by the ELF loader. */
+static int tcc_load_member(TCCState *s1, int fd, unsigned long file_offset, int type)
+{
+    if (!type) {
+        ElfW(Ehdr) ehdr;
+        lseek(fd, file_offset, SEEK_SET);
+        type = tcc_object_type(fd, &ehdr);
+    }
+#ifdef TCC_TARGET_PE
+    if (type == AFF_BINTYPE_COFF)
+        return pe_load_obj_file(s1, fd, file_offset);
+#endif
+    return tcc_load_object_file(s1, fd, file_offset);
+}
+
 /* load only the objects which resolve undefined symbols */
 static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
 {
@@ -3656,7 +3692,7 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
             off += len;
             if (s1->verbose == 2)
                 printf("   -> %s\n", hdr.ar_name);
-            if (tcc_load_object_file(s1, fd, off) < 0)
+            if (tcc_load_member(s1, fd, off, 0) < 0)
                 goto the_end;
             ++bound;
         }
@@ -3694,11 +3730,14 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
                 return tcc_load_alacarte(s1, fd, size, 4);
             if (!strcmp(hdr.ar_name, "/SYM64/"))
                 return tcc_load_alacarte(s1, fd, size, 8);
-        } else if (tcc_object_type(fd, &ehdr) == AFF_BINTYPE_REL) {
-            if (s1->verbose == 2)
-                printf("   -> %s\n", hdr.ar_name);
-            if (tcc_load_object_file(s1, fd, file_offset) < 0)
-                return -1;
+        } else {
+            int t = tcc_object_type(fd, &ehdr);
+            if (t == AFF_BINTYPE_REL || t == AFF_BINTYPE_COFF) {
+                if (s1->verbose == 2)
+                    printf("   -> %s\n", hdr.ar_name);
+                if (tcc_load_member(s1, fd, file_offset, t) < 0)
+                    return -1;
+            }
         }
         /* align to even */
         file_offset = (file_offset + size + 1) & ~1;

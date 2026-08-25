@@ -1292,6 +1292,7 @@ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
 #define AFF_BINTYPE_DYN 2
 #define AFF_BINTYPE_AR  3
 #define AFF_BINTYPE_C67 4
+#define AFF_BINTYPE_COFF 5 /* PE-COFF relocatable object (win32 targets) */
 
 /* return value of tcc_add_file_internal(): 0, -1, or FILE_NOT_FOUND */
 #define FILE_NOT_FOUND -2
@@ -1765,6 +1766,7 @@ ST_FUNC void asm_clobber(uint8_t *clobber_regs, const char *str);
 /* ------------ tccpe.c -------------- */
 #ifdef TCC_TARGET_PE
 ST_FUNC int pe_load_file(struct TCCState *s1, int fd, const char *filename);
+ST_FUNC int pe_load_obj_file(struct TCCState *s1, int fd, unsigned long file_offset);
 ST_FUNC int pe_output_file(TCCState * s1, const char *filename);
 ST_FUNC int pe_putimport(TCCState *s1, int dllindex, const char *name, addr_t value);
 ST_FUNC int pe_setsubsy(TCCState *s1, const char *arg);

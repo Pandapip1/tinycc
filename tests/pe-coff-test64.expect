@@ -1,0 +1,7 @@
+add=37
+addr32=1
+selfptr=1
+textptr=1
+rel32=42
+set=55
+setb=9

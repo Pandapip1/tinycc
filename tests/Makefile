@@ -21,7 +21,8 @@ TESTS = \
  pp-dir \
  memtest \
  dlltest \
- cross-test
+ cross-test \
+ pe-coff-test
 
 # test4_static -- Not all relocation types are implemented yet.
 # asmtest / asmtest2 -- minor differences with gcc
@@ -290,6 +291,12 @@ asm-c-connect-test: asm-c-connect$(EXESUF) asm-c-connect-sep$(EXESUF)
 	./asm-c-connect-sep$(EXESUF) > asm-c-connect.out2 && cat asm-c-connect.out2
 	@diff -u asm-c-connect.out1 asm-c-connect.out2 || (echo "error"; exit 1)
 
+# the PE-COFF object reader: feed tcc's win32 linker genuine GNU as output.
+# Skips cleanly when the MinGW assembler (or wine) is not installed.
+pe-coff-test:
+	@echo ------------ $@ ------------
+	@$(SHELL) $(TOPSRC)/tests/pe-coff-test.sh $(TOPSRC) $(TOP) "$(MAKE)"
+
 # quick sanity check for cross-compilers
 cross-test : tcctest.c examples/ex3.c
 	@echo ------------ $@ ------------
@@ -346,6 +353,7 @@ clean:
 	rm -f *-cc *-gcc *-tcc *.exe hello libtcc_test vla_test tcctest[1234]
 	rm -f asm-c-connect asm-c-connect-sep
 	rm -f ex? tcc_g weaktest.*.txt *.def *.pdb *.obj libtcc_test_mt
+	rm -rf pe-coff-tmp
 	@$(MAKE) -C tests2 $@
 	@$(MAKE) -C pp $@
 
