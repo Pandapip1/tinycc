@@ -7,8 +7,14 @@ ascii-ok
 [test_file_then_type]
 type-ok
 
+[test_file_then_type_function]
+type-function-ok
+
 [test_file_twice]
 twice-ok
 
-[test_file_remaps_diagnostics]
-asmfile.c:2: error: missing terminating " character
+[test_file_dwarf5_form]
+dwarf5-ok
+
+[test_file_does_not_remap_diagnostics]
+149_asm_file_directive.c:81: error: missing terminating " character

@@ -631,6 +631,7 @@ static void error1(int mode, const char *fmt, va_list ap)
     TCCState *s1 = tcc_state;
     CString cs;
     int line = 0;
+    int tf = tok_flags;
 
     tcc_exit_state(s1);
 
@@ -659,14 +660,17 @@ static void error1(int mode, const char *fmt, va_list ap)
     if (s1->error_set_jmp_enabled) { /* we're called while parsing a file */
         /* use upper file if inline ":asm:" or token ":paste:" */
         for (f = file; f && f->filename[0] == ':'; f = f->prev)
-            ;
+            /* the flags of the enclosing file were saved when the inner
+               buffer was opened; the global tok_flags belong to the inner
+               ":asm:"/":paste:" buffer and must not be used for f */
+            tf = f->prev_tok_flags;
     }
     if (f) {
         for(pf = s1->include_stack; pf < s1->include_stack_ptr; pf++)
             cstr_printf(&cs, "In file included from %s:%d:\n",
                 (*pf)->filename, (*pf)->line_num - 1);
         if (0 == line)
-            line = f->line_num - ((tok_flags & TOK_FLAG_BOL) && !macro_ptr);
+            line = f->line_num - ((tf & TOK_FLAG_BOL) && !macro_ptr);
         cstr_printf(&cs, "%s:%d: ", f->filename, line);
     } else if (s1->current_filename) {
         cstr_printf(&cs, "%s: ", s1->current_filename);
