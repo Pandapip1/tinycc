@@ -68,4 +68,5 @@ tests/vla_test
 tests/hello
 tests/tests2/fred.txt
 tests/pe-coff-tmp
+tests/repro-tmp
 libtcc.dylib
