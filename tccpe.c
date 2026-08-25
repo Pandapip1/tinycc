@@ -317,6 +317,7 @@ typedef struct _IMAGE_BASE_RELOCATION {
 #define IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE 0x8000
 
 #define IMAGE_FILE_RELOCS_STRIPPED 0x0001
+#define IMAGE_FILE_DEBUG_STRIPPED 0x0200
 
 #pragma pack(pop)
 
@@ -909,6 +910,11 @@ static int pe_write(struct pe_info *pe)
         pe_header.filehdr.PointerToSymbolTable = file_offset;
         pe_header.filehdr.NumberOfSymbols
             = pe->coffsym->data_offset / sizeof (struct syment);
+        /* the image really does carry debugging information now, so it may
+           not claim IMAGE_FILE_DEBUG_STRIPPED.  IMAGE_FILE_LOCAL_SYMS_STRIPPED
+           stays set and is accurate: pe_add_coffsym() emits STB_GLOBAL
+           symbols only. */
+        pe_header.filehdr.Characteristics &= ~IMAGE_FILE_DEBUG_STRIPPED;
     }
 
     pe_fwrite(pe, &pe_header, sizeof pe_header);
