@@ -415,6 +415,18 @@ Put custom search path for dynamic libraries into executable.
 Set the ELF interpreter (dynamic linker). This defaults to the value of the
 environment variable @env{LD_SO} if set, or a compiled-in default.
 
+@item -Wl,--build-id=none
+@itemx -Wl,--no-insert-timestamp
+@itemx -Wl,--hash-style=sysv
+Accepted and do nothing, because that is already what tcc does: it never
+emits a @code{.note.gnu.build-id} section, never writes a timestamp into
+its output, and emits a SysV @code{.hash} section only.  They are accepted
+so that build systems which pass them to obtain reproducible output do not
+have to special-case tcc.  The other values of these options
+(@option{--build-id}, @option{--build-id=sha1}, @option{--insert-timestamp},
+@option{--hash-style=gnu}, @option{--hash-style=both}) ask for something
+tcc does not do and remain errors.
+
 @item -Wl,--enable-new-dtags
 When putting a custom search path for dynamic libraries into the executable,
 create the new ELF dynamic tag DT_RUNPATH instead of the old legacy DT_RPATH.

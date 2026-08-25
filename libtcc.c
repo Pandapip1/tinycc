@@ -1526,6 +1526,20 @@ static int tcc_set_linker(TCCState *s, const char *optarg)
         } else if (link_option(&o, "single_module")) {
             ignoring = 1;
 #endif
+        } else if (link_option(&o, "build-id|build-id=")) {
+            /* tcc never emits a .note.gnu.build-id section, so '=none' is
+               already what happens; anything else asks for a build-id that
+               tcc cannot compute */
+            if (strcmp(o.arg, "none"))
+                goto err;
+        } else if (!!(r = link_option(&o, "?insert-timestamp"))) {
+            /* tcc never writes a timestamp into its output */
+            if (r > 0)
+                goto err;
+        } else if (link_option(&o, "hash-style=")) {
+            /* tcc emits a SysV .hash section and nothing else */
+            if (strcmp(o.arg, "sysv"))
+                goto err;
         } else if (link_option(&o, "as-needed")) {
             ignoring = 1;
         } else if (link_option(&o, "O")) {
