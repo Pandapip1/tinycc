@@ -1,0 +1,28 @@
+none|
+file|	.file	"x.c"
+file2|	.file	1 "y.c"
+ident|	.ident	"GCC: (x) 1.0"
+text|	.text
+sec_rodata|	.section	.rodata
+sec_flags|	.section	.rodata.cst8,"aM",@progbits
+push_pop|	.pushsection .foo,"a"
+	.byte 1
+	.popsection
+previous|	.section .bar,"a"
+	.byte 1
+	.previous
+rept|	.rept 2
+	.byte 9
+	.endr
+set|	.set	asym, 3
+comm|	.comm	acom,4,4
+weak|	.weak	awk1
+lcomm|	.lcomm alc,8
+x_align|	.p2align 4,,15
+zero|	.zero 4
+sleb|	.sleb128 3
+def_macro|#define AMAC 1
+line|# 12 "foo.c"
+code64|	.code64
+x_loc|	.local aloc1
+x_str|	.string "pfx"

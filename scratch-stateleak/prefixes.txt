@@ -1,0 +1,32 @@
+sizeof_expr|int pfx_a; int pfx_x = sizeof(pfx_a + 1);
+sizeof_vla|void pfx_f(int n){ int v[n]; (void)sizeof(v); }
+generic|int pfx_g = _Generic(1, int: 1, default: 0);
+stmtexpr|int pfx_h(void){ return ({ int q=3; q+1; }); }
+condexpr_c0|int pfx_i = 0 ? 1 : 2;
+condexpr_c1|int pfx_j = 1 ? 1 : 2;
+landor|int pfx_k = 0 && 5;
+landor2|int pfx_l = 1 || 5;
+builtin_cp|int pfx_m = __builtin_constant_p(3);
+builtin_choose|int pfx_n = __builtin_choose_expr(1, 2, 3);
+knr_func|int pfx_o(a) int a; { return a; }
+static_init|static int pfx_p[2] = {1,2};
+inline_fn|static inline int pfx_q(void){ return 7; }
+global_asm|__asm__(".text\n.byte 0x90\n");
+global_asm_sec|__asm__(".section .foo,\"a\"\n.byte 1\n");
+inline_asm|int pfx_r(void){ int z; __asm__ volatile("nop":"=r"(z)); return z; }
+typeof|int pfx_s; __typeof__(pfx_s) pfx_t;
+alignof|int pfx_u = __alignof__(double);
+comp_lit|int *pfx_v = (int[]){1,2,3};
+va_arg_fn|#include <stdarg.h>
+goto_lbl|int pfx_w(int x){ if(x) goto L; return 1; L: return 2; }
+dead_code|int pfx_x2(void){ return 1; return 2; }
+switch_ncw|int pfx_y(int x){ switch(x){ return 5; case 1: return 6;} return 7; }
+atomic|int pfx_z(int*p){ return __atomic_load_n(p, 0); }
+enum_const|enum { PFX_E = sizeof(int)*2 };
+bitfield|struct pfx_bf { int a:3; int b:5; };
+arr_const|int pfx_ac[sizeof(int)+1];
+nested_fn_decl|int pfx_nd(int (*f)(int (*)(void)));
+cast_ncw|int pfx_cc = (int)(long)(char)300;
+neg_shift|int pfx_ns = 1 << (2+3);
+str_lit|char *pfx_sl = "abc" "def";
+wide_str|int *pfx_ws = (int*)L"ab";
