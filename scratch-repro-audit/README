@@ -1,0 +1,12 @@
+Reproducible-builds reconnaissance scripts (scratch; not part of the build).
+No compiler source was modified.
+
+t_path.sh      - vary build directory path, hold source identical
+t_name.sh      - vary source filename; absolute vs relative source path
+t_env.sh       - vary time-of-day and TZ/LC_ALL/LANG/HOSTNAME/USER/TMPDIR/
+                 SOURCE_DATE_EPOCH/PWD
+t_datemacro.sh - __DATE__/__TIME__/__TIMESTAMP__ behaviour
+t_flags.sh     - acceptance of common reproducible-build flags
+t_misc.sh      - ASLR (setarch -R), umask, link input order, batch vs
+                 individual -c, `tcc -ar` archive determinism
+src.c b.c c.c  - fixtures
