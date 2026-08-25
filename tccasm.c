@@ -597,6 +597,23 @@ static void pop_section(TCCState *s1)
     use_section1(s1, prev);
 }
 
+/* GAS picks a section type from the section name when '.section' does
+   not name one explicitly (see GAS docs, "Section": ELF Version). */
+static int asm_default_section_type(const char *name)
+{
+    if (!strncmp(name, ".note", 5))
+        return SHT_NOTE;
+    if (!strncmp(name, ".preinit_array", 14))
+        return SHT_PREINIT_ARRAY;
+    if (!strncmp(name, ".init_array", 11))
+        return SHT_INIT_ARRAY;
+    if (!strncmp(name, ".fini_array", 11))
+        return SHT_FINI_ARRAY;
+    if (!strncmp(name, ".bss", 4) || !strncmp(name, ".tbss", 5))
+        return SHT_NOBITS;
+    return SHT_PROGBITS;
+}
+
 static void asm_parse_directive(TCCState *s1, int global)
 {
     int n, offset, v, size, tok1, c;
@@ -1022,7 +1039,7 @@ static void asm_parse_directive(TCCState *s1, int global)
             char sname[256];
 	    int old_nb_section = s1->nb_sections;
             int flags = SHF_ALLOC;
-            int sh_type = SHT_PROGBITS;
+            int sh_type = -1;
             int entsize = -1;
 
 	    tok1 = tok;
@@ -1062,9 +1079,21 @@ static void asm_parse_directive(TCCState *s1, int global)
                     next();
                     if (tok == '@' || tok == '%')
                         next();
-                    if (tok >= TOK_IDENT
-                        && !strcmp(get_tok_str(tok, NULL), "nobits"))
-                        sh_type = SHT_NOBITS;
+                    if (tok >= TOK_IDENT) {
+                        const char *tname = get_tok_str(tok, NULL);
+                        if (!strcmp(tname, "nobits"))
+                            sh_type = SHT_NOBITS;
+                        else if (!strcmp(tname, "progbits"))
+                            sh_type = SHT_PROGBITS;
+                        else if (!strcmp(tname, "note"))
+                            sh_type = SHT_NOTE;
+                        else if (!strcmp(tname, "init_array"))
+                            sh_type = SHT_INIT_ARRAY;
+                        else if (!strcmp(tname, "fini_array"))
+                            sh_type = SHT_FINI_ARRAY;
+                        else if (!strcmp(tname, "preinit_array"))
+                            sh_type = SHT_PREINIT_ARRAY;
+                    }
                     next();
                     if (tok == ',') {
                         /* entry size (M/S/E), or a group/symbol name */
@@ -1096,7 +1125,14 @@ static void asm_parse_directive(TCCState *s1, int global)
                 if (!strcmp(sname, ".init") || !strcmp(sname, ".fini"))
                     flags |= SHF_EXECINSTR;
 	        cur_text_section->sh_flags = flags;
+                if (sh_type < 0)
+                    sh_type = asm_default_section_type(sname);
                 cur_text_section->sh_type = sh_type;
+                if (entsize < 0
+                    && (sh_type == SHT_INIT_ARRAY
+                        || sh_type == SHT_FINI_ARRAY
+                        || sh_type == SHT_PREINIT_ARRAY))
+                    entsize = PTR_SIZE; /* as GAS does */
                 if (entsize > 0)
                     cur_text_section->sh_entsize = entsize;
             }
