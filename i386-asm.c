@@ -778,7 +778,7 @@ again:
 	        s++;
 	      }
         } else if (it == OPC_SHIFT) {
-            if (!(opcode >= pa->sym && opcode < pa->sym + 7*NBWLX))
+            if (!(opcode >= pa->sym && opcode < pa->sym + 8*NBWLX))
                 continue;
             s = (opcode - pa->sym) % NBWLX;
         } else if (it == OPC_TEST) {
@@ -1116,9 +1116,10 @@ again:
     g(v);
 
     if (OPCT_IS(pa->instr_type, OPC_SHIFT)) {
-        reg = (opcode - pa->sym) / NBWLX;
-        if (reg == 6)
-            reg = 7;
+        /* token order is rol,ror,rcl,rcr,shl,shr,sar,sal; sar is group-2
+           /7 and sal is just another name for shl (/4) */
+        static const uint8_t shift_group[8] = { 0, 1, 2, 3, 4, 5, 7, 4 };
+        reg = shift_group[(opcode - pa->sym) / NBWLX];
     } else if (OPCT_IS(pa->instr_type, OPC_ARITH)) {
         reg = (opcode - pa->sym) / NBWLX;
     } else if (OPCT_IS(pa->instr_type, OPC_FARITH)) {

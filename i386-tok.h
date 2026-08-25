@@ -210,6 +210,7 @@
  DEF_BWLX(shl)
  DEF_BWLX(shr)
  DEF_BWLX(sar)
+ DEF_BWLX(sal) /* alias of shl; must stay last of the shift group */
 
  DEF_WLX(shld)
  DEF_WLX(shrd)
