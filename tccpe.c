@@ -828,6 +828,15 @@ static int pe_write(struct pe_info *pe)
         pe_header.opthdr.SizeOfImage =
             umax(pe_virtual_align(pe, size + addr), pe_header.opthdr.SizeOfImage);
 
+        /* PE Format, Optional Header Standard Fields: SizeOfUninitializedData
+           is "the sum of all such sections if there are multiple BSS
+           sections".  Keyed on the flag that is written into this very
+           section header, so the two always agree.  A BSS section has no
+           file-resident data and so never reaches the SizeOfCode /
+           SizeOfInitializedData split below; its size is its virtual size. */
+        if (si->pe_flags & IMAGE_SCN_CNT_UNINITIALIZED_DATA)
+            pe_header.opthdr.SizeOfUninitializedData += size;
+
         if (si->data_size) {
             psh->PointerToRawData = file_offset;
             file_offset = pe_file_align(pe, file_offset + si->data_size);
