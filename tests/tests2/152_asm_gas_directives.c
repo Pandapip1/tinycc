@@ -218,4 +218,29 @@ int main(void)
     return 0;
 }
 
+#elif defined test_linkonce
+
+/* '.linkonce [type]' marks the current section link-once (a COMDAT), so
+   that the linker keeps a single copy of it; the type argument is
+   optional.  gcc emits it for every vague-linkage C++ entity (vtables,
+   typeinfo, template instantiations, out-of-line copies of inline
+   functions) when it targets PE, alongside a 'name$symbol' section.
+   TCC only writes ELF objects and has no way to carry the mark, so it
+   accepts the directive, warns once per file, and drops it. */
+__asm__(".section .rodata.lo1$x,\"a\",@progbits\n"
+        ".globl lo_a\n"
+        "lo_a: .long 0x11223344\n"
+        ".linkonce discard\n"
+        ".section .rodata.lo2$x,\"a\",@progbits\n"
+        ".globl lo_b\n"
+        "lo_b: .long 0x55667788\n"
+        ".linkonce\n"                  /* the type argument is optional */
+        ".section .rodata.lo3$x,\"a\",@progbits\n"
+        ".globl lo_c\n"
+        "lo_c: .long 0x0099aabb\n"
+        ".linkonce same_contents\n"
+        ".text\n");
+extern const unsigned lo_a, lo_b, lo_c;
+int main(void) { printf("%x %x %x\n", lo_a, lo_b, lo_c); return 0; }
+
 #endif

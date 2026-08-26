@@ -68,4 +68,15 @@ int b;
 void f(void) { __asm__ volatile(".ident \"zz\"\n"); }   /* line 68 */
 int main(void) { return 0; }
 
+#elif defined test_asm_linkonce_bad_type
+
+/* GAS only warns about an unrecognized '.linkonce' type and carries on
+   (gas/read.c, s_linkonce()); the valid types are discard, one_only,
+   same_size and same_contents.  The second warning is the once-per-file
+   note that the mark itself is dropped. */
+void g(void) { __asm__ volatile(".section .foo$x,\"a\"\n"
+                                ".linkonce bogus_type\n"
+                                ".text\n"); }   /* line 79 */
+int main(void) { return 0; }
+
 #endif

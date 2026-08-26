@@ -25,6 +25,7 @@
 static Section *last_text_section; /* to handle .previous asm directive */
 static int asmgoto_n;
 static int warned_cfi; /* .cfi_* directives seen and ignored */
+static int warned_linkonce; /* .linkonce directives seen and ignored */
 
 /* Deferred 'labelA - labelB' differences in data directives.  Needed for
    forward local label references such as '.long 1f - 0f', which GAS
@@ -967,8 +968,47 @@ static void asm_parse_directive(TCCState *s1, int global)
             next();
         }
         break;
+    case TOK_ASMDIR_linkonce:
+        /* '.linkonce [discard|one_only|same_size|same_contents]' marks the
+           current section link-once, i.e. a COMDAT: the linker keeps a
+           single copy of it, matched by section name.  GAS docs, node
+           "Linkonce".  gcc emits it for every vague-linkage C++ entity
+           (vtables, typeinfo, template instantiations, out-of-line inline
+           functions) when targeting PE.
+
+           TCC writes ELF objects for every target, PE included (see
+           tcc_set_output_type(): "always elf for objects"), and neither
+           that object format as TCC uses it nor its linker has a way to
+           carry the mark: tcc_load_object_file() only ever treats a
+           section as link-once when its name starts with ".gnu.linkonce",
+           and it strips SHF_GROUP.  So the directive is parsed and
+           dropped.  GAS behaves the same way for output formats that
+           cannot express it, warning ".linkonce is not supported for this
+           object file format" (gas/read.c, s_linkonce()).
+
+           Consequence, and the reason for warning: duplicate definitions
+           of a vague-linkage entity are no longer folded.  Two objects
+           that both define one will keep both copies, and the global
+           symbol in them collides at link time. */
+        next();
+        if (tok != ';' && tok != TOK_LINEFEED) {
+            const char *type = get_tok_str(tok, &tokc);
+            /* GAS only warns about an unknown type and carries on. */
+            if (strcmp(type, "discard")
+                && strcmp(type, "one_only")
+                && strcmp(type, "same_size")
+                && strcmp(type, "same_contents"))
+                tcc_warning("unrecognized .linkonce type '%s'", type);
+            next();
+        }
+        if (!warned_linkonce) {
+            warned_linkonce = 1;
+            tcc_warning("ignoring .linkonce: duplicate copies of a link-once"
+                        " section will not be discarded");
+        }
+        break;
     case TOK_ASMDIR_size:
-        { 
+        {
             Sym *sym;
             ElfSym *esym;
 
@@ -1436,6 +1476,7 @@ ST_FUNC int tcc_assemble(TCCState *s1, int do_preprocess)
     int ret;
     tcc_debug_start(s1);
     warned_cfi = 0;
+    warned_linkonce = 0;
     /* default section is text */
     nb_section_stack = 0;
     cur_text_section = text_section;

@@ -19,3 +19,7 @@
 
 [test_asm_ident_control]
 150_asm_diagnostics.c:68: warning: ignoring .ident zz
+
+[test_asm_linkonce_bad_type]
+150_asm_diagnostics.c:79: warning: unrecognized .linkonce type 'bogus_type'
+150_asm_diagnostics.c:79: warning: ignoring .linkonce: duplicate copies of a link-once section will not be discarded

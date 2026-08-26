@@ -28,3 +28,7 @@ main
 
 [test_rip_immediate]
 0 55 0
+
+[test_linkonce]
+152_asm_gas_directives.c:242: warning: ignoring .linkonce: duplicate copies of a link-once section will not be discarded
+11223344 55667788 99aabb
