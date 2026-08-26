@@ -884,16 +884,23 @@ static int pe_write(struct pe_info *pe)
     pe_header.opthdr.FileAlignment = pe->file_align;
     /* the errors that rule these values out are raised before the
        output file is created, at the top of this function */
-    /* only warn when the user asked for this alignment; tcc's own native
-       default is unmeasured (see pe_set_options()) */
-    if (s1->section_align && pe->section_align < 0x1000)
-        tcc_warning("section alignment 0x%x is below the page size;"
-            " modern Windows will not load this image", pe->section_align);
+    /* warn however the sub-page value was reached: -subsystem=native picks
+       one by default (see pe_set_options()), which used to make the most
+       surprising path the silent one.  Not an error and not clamped: a
+       sub-page SectionAlignment with FileAlignment == SectionAlignment is
+       what the PE format prescribes, and some loaders do accept it.  Which
+       Windows versions accept it is not measured here, so the wording does
+       not name a boundary. */
+    if (pe->section_align < 0x1000)
+        tcc_warning("section alignment 0x%x is below the page size%s;"
+            " such an image requires FileAlignment == SectionAlignment and"
+            " is not loadable on all Windows versions", pe->section_align,
+            s1->section_align ? "" : " (implied by -subsystem=native)");
     /* same field: FileAlignment "should be a power of 2 between 512 and
        64 K, inclusive", the exception being a sub-page SectionAlignment,
-       which FileAlignment must then match.  A warning, not an error: the
-       image stays self-consistent, and as above tcc's own native default is
-       not warned about -- only a value the user asked for. */
+       which FileAlignment must then match (that case is already covered by
+       the warning above).  A warning, not an error: the image stays
+       self-consistent.  Only a value the user asked for is warned about. */
     if (s1->pe_file_align
         && (pe->file_align < 0x200 || pe->file_align > 0x10000)
         && !(pe->section_align < 0x1000 && pe->file_align == pe->section_align))

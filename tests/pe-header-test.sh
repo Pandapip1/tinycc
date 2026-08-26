@@ -101,4 +101,30 @@ for target in i386-win32 x86_64-win32; do
     grep -q 'below the page size' "$OUT/sub.log" \
         || fail "$target: the sub-page section-alignment warning stopped firing"
     echo " . $target: the sub-page alignment warning still fires"
+
+    # 5. -subsystem=native picks a sub-page alignment by itself; that used to
+    #    be the one path that reached it silently.  It must warn too -- once.
+    "$TCC" $TCCFLAGS -o "$OUT/native.exe" "$OUT/hello.c" -Wl,-subsystem=native \
+        >"$OUT/native.log" 2>&1 || fail "$target: -subsystem=native now fails"
+    python3 "$CHECK" "$OUT/native.exe" subpage-section-align subsystem-native \
+        || fail "$target: -subsystem=native no longer emits a sub-page image"
+    [ "$(grep -c 'below the page size' "$OUT/native.log")" = 1 ] \
+        || fail "$target: -subsystem=native did not warn exactly once"
+
+    #    ...and passing an explicit sub-page alignment as well must not warn
+    #    twice about the same field.
+    "$TCC" $TCCFLAGS -o "$OUT/native2.exe" "$OUT/hello.c" \
+        -Wl,-subsystem=native -Wl,--section-alignment=20 \
+        -Wl,--file-alignment=20 >"$OUT/native2.log" 2>&1 \
+        || fail "$target: -subsystem=native with an explicit alignment fails"
+    [ "$(grep -c 'below the page size' "$OUT/native2.log")" = 1 ] \
+        || fail "$target: sub-page section alignment warned more than once"
+
+    #    the default image must stay quiet.
+    "$TCC" $TCCFLAGS -o "$OUT/quiet.exe" "$OUT/hello.c" \
+        >"$OUT/quiet.log" 2>&1 || fail "$target: the default build fails"
+    if grep -q 'below the page size' "$OUT/quiet.log"; then
+        fail "$target: the default image warns about its alignment"
+    fi
+    echo " . $target: -subsystem=native warns once, the default not at all"
 done

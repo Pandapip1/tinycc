@@ -31,6 +31,12 @@ class Image:
         self.chars = u16(d, fh + 18)
         oh = fh + 20
         self.size_uninit = u32(d, oh + 12)
+        # SectionAlignment/FileAlignment/Subsystem sit at the same offsets
+        # in PE32 and PE32+: the extra 4 bytes of a 64-bit ImageBase make up
+        # for the BaseOfData field PE32+ does not have.
+        self.section_align = u32(d, oh + 32)
+        self.file_align = u32(d, oh + 36)
+        self.subsystem = u16(d, oh + 68)
         sh = oh + u16(d, fh + 16)
         self.secs = [dict(name=d[sh+40*i:sh+40*i+8],
                           vsize=u32(d, sh+40*i+8),
@@ -91,6 +97,27 @@ def check_names_nul_padded(im):
         n = s['name']
         if b'\0' in n and n[n.index(b'\0'):].strip(b'\0'):
             return "section name %r has residual bytes past the NUL" % n
+
+def check_subpage_section_align(im):
+    """SectionAlignment is below the page size, and FileAlignment matches.
+
+    PE Format, Optional Header Windows-Specific Fields: FileAlignment
+    "should be a power of 2 between 512 and 64 K"; the SectionAlignment
+    entry adds "if the SectionAlignment is less than the architecture's page
+    size, then FileAlignment must match SectionAlignment."  This asserts the
+    shape of the image that tcc must warn about, not that it is a good idea.
+    """
+    if im.section_align >= 0x1000:
+        return "SectionAlignment is 0x%x, not below the page size" % (
+            im.section_align,)
+    if im.file_align != im.section_align:
+        return "SectionAlignment 0x%x but FileAlignment 0x%x" % (
+            im.section_align, im.file_align)
+
+def check_subsystem_native(im):
+    """Subsystem is IMAGE_SUBSYSTEM_NATIVE (1)."""
+    if im.subsystem != 1:
+        return "Subsystem is %d, not 1 (native)" % im.subsystem
 
 def check_has_long_names(im):
     if not [s for s in im.secs if s['name'].startswith(b'/')]:
