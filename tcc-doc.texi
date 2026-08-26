@@ -1190,6 +1190,24 @@ supported:
 @item .type symbol, type
 @end itemize
 
+The following directives are accepted for compatibility with @code{gcc
+-S} output and then dropped:
+
+@itemize
+@item .linkonce [discard|one_only|same_size|same_contents] --- marks the
+current section link-once (a COMDAT).  TinyCC only writes ELF objects, for
+every target including PE, and neither that object format as it uses it
+nor its linker can carry the mark, so duplicate copies of a link-once
+section are @emph{not} discarded; a warning says so.  Two objects that
+each define the same vague-linkage C++ entity will therefore collide at
+link time.
+@item .def name; .scl n; .type n; .endef --- the COFF symbol annotation
+that gcc emits for every function when targeting PE.  TinyCC derives the
+storage class and symbol type from the ELF symbol instead.
+@item .cfi_* --- call frame information.  TinyCC generates no unwind
+tables.
+@end itemize
+
 @section X86 Assembler
 @cindex assembler
 
