@@ -3995,6 +3995,15 @@ void builtin_test(void)
 
     //printf("bera: %p\n", __builtin_extract_return_addr((void*)43));
 
+#if defined(__i386__) || defined(__x86_64__)
+    /* must fold to the target's dwarf regno for the EH data registers,
+       and to -1 for indices the target has no such register for */
+    printf("beh: %d %d %d\n",
+	   __builtin_eh_return_data_regno(0),
+	   __builtin_eh_return_data_regno(1),
+	   __builtin_eh_return_data_regno(2));
+#endif
+
     {
 	int cnt[18];
 	unsigned long long r = 0;
