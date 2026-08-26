@@ -70,3 +70,4 @@ tests/tests2/fred.txt
 tests/pe-coff-tmp
 tests/repro-tmp
 libtcc.dylib
+tests/ar-longname-tmp
