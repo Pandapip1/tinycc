@@ -78,7 +78,10 @@ ST_FUNC int tcc_tool_ar(int argc, char **argv)
     char *buf, *shstr, *symtab, *strtab;
     int symtabsize = 0;//, strtabsize = 0;
     char *anames = NULL;
+    char *lnames = NULL;
     int *afpos = NULL;
+    int lnpos = 0, lnsize = 0;
+    ArHdr arhdrln;
     int istrlen, strpos = 0, fpos = 0, funccnt = 0, funcmax, hofs;
     char tfile[260], stmp[20];
     char *file, *name;
@@ -143,17 +146,38 @@ no_ar:
 	    fsize = atoi(arhdr.ar_size);
 	    buf = tcc_malloc(fsize + 1);
 	    fread(buf, fsize, 1, fh);
-	    if (strcmp(arhdr.ar_name,"/") && strcmp(arhdr.ar_name,"/SYM64/")) {
-		if (e > p && e[-1] == '/')
+	    buf[fsize] = '\0';
+	    if (!strcmp(arhdr.ar_name, "//")) {
+		/* SysV/GNU extended name table */
+		tcc_free(lnames);
+		lnames = buf;
+		lnsize = fsize;
+		buf = NULL;
+	    } else if (strcmp(arhdr.ar_name,"/") && strcmp(arhdr.ar_name,"/SYM64/")) {
+		name = arhdr.ar_name;
+		if (name[0] == '/' && name[1] >= '0' && name[1] <= '9') {
+		    /* long name: "/<decimal offset>" into the "//" member */
+		    int off = atoi(name + 1);
+		    if (!lnames || off >= lnsize) {
+			fprintf(stderr, "tcc: ar: invalid long name in %s\n",
+				argv[i_lib]);
+			tcc_free(buf);
+			goto finish;
+		    }
+		    name = lnames + off;
+		    for (e = name; *e && *e != '/' && *e != '\n';)
+			e++;
+		    *e = '\0';
+		} else if (e > p && e[-1] == '/')
 		    e[-1] = '\0';
 		/* tv not implemented */
 	        if (table || verbose)
-		    printf("%s%s\n", extract ? "x - " : "", arhdr.ar_name);
+		    printf("%s%s\n", extract ? "x - " : "", name);
 		if (extract) {
-		    if ((fo = fopen(arhdr.ar_name, "wb")) == NULL)
+		    if ((fo = fopen(name, "wb")) == NULL)
 		    {
 			fprintf(stderr, "tcc: ar: can't create file %s\n",
-				arhdr.ar_name);
+				name);
 		        tcc_free(buf);
 			goto finish;
 		    }
@@ -168,6 +192,7 @@ no_ar:
 	}
 	ret = 0;
 finish:
+	tcc_free(lnames);
 	if (fh)
 		fclose(fh);
 	return ret;
@@ -277,11 +302,22 @@ finish:
              name > file && name[-1] != '/' && name[-1] != '\\';
              --name);
         istrlen = strlen(name);
-        if (istrlen >= sizeof(arhdro.ar_name))
-            istrlen = sizeof(arhdro.ar_name) - 1;
         memset(arhdro.ar_name, ' ', sizeof(arhdro.ar_name));
-        memcpy(arhdro.ar_name, name, istrlen);
-        arhdro.ar_name[istrlen] = '/';
+        if (istrlen < (int)sizeof(arhdro.ar_name)) {
+            /* short name: stored inline, terminated by '/' */
+            memcpy(arhdro.ar_name, name, istrlen);
+            arhdro.ar_name[istrlen] = '/';
+        } else {
+            /* long name: stored in the "//" member and referenced here
+               as "/<decimal offset>" (SysV/GNU extended name format) */
+            lnames = tcc_realloc(lnames, lnpos + istrlen + 2);
+            memcpy(lnames + lnpos, name, istrlen);
+            lnames[lnpos + istrlen] = '/';
+            lnames[lnpos + istrlen + 1] = '\n';
+            sprintf(stmp, "/%d", lnpos);
+            memcpy(arhdro.ar_name, stmp, strlen(stmp));
+            lnpos += istrlen + 2;
+        }
         sprintf(stmp, "%-10d", fsize);
         memcpy(&arhdro.ar_size, stmp, 10);
         fwrite(&arhdro, sizeof(arhdro), 1, fo);
@@ -296,6 +332,10 @@ finish:
     fpos = 0;
     if ((hofs & 1)) // align
         hofs++, fpos = 1;
+    if (lnpos) { // the extended name table sits between armap and objects
+        lnsize = lnpos + (lnpos & 1);
+        hofs += sizeof(arhdr) + lnsize;
+    }
     // write header
     fwrite(ARMAG, 8, 1, fh);
     // create an empty archive
@@ -313,6 +353,18 @@ finish:
     fwrite(anames, strpos, 1, fh);
     if (fpos)
         fwrite("", 1, 1, fh);
+    // write the extended name table
+    if (lnpos) {
+        memset(&arhdrln, ' ', sizeof(arhdrln));
+        arhdrln.ar_name[0] = arhdrln.ar_name[1] = '/';
+        sprintf(stmp, "%-10d", lnsize);
+        memcpy(&arhdrln.ar_size, stmp, 10);
+        memcpy(&arhdrln.ar_fmag, ARFMAG, 2);
+        fwrite(&arhdrln, sizeof(arhdrln), 1, fh);
+        fwrite(lnames, lnpos, 1, fh);
+        if (lnsize > lnpos)
+            fwrite("\n", 1, 1, fh);
+    }
     // write objects
     fseek(fo, 0, SEEK_END);
     fsize = ftell(fo);
@@ -325,6 +377,8 @@ finish:
 the_end:
     if (anames)
         tcc_free(anames);
+    if (lnames)
+        tcc_free(lnames);
     if (afpos)
         tcc_free(afpos);
     if (fh)

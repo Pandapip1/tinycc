@@ -3662,6 +3662,55 @@ static int tcc_load_member(TCCState *s1, int fd, unsigned long file_offset, int 
     return tcc_load_object_file(s1, fd, file_offset);
 }
 
+/* SysV/GNU archives keep member names longer than 15 chars in a special
+   "//" member and refer to them as "/<decimal offset>".  Resolve such a
+   name for diagnostics; TAB caches the table and must be tcc_free()d. */
+static const char *ar_member_name(int fd, ArchiveHeader *hdr,
+                                  char **tab, int *tabsize)
+{
+    char *name = hdr->ar_name, *p;
+    int off, size, len;
+    unsigned long pos;
+    ArchiveHeader h;
+
+    if (name[0] != '/' || name[1] < '0' || name[1] > '9') {
+        p = strchr(name, 0); /* short names are terminated by '/' */
+        if (p > name + 1 && p[-1] == '/')
+            p[-1] = 0;
+        return name;
+    }
+    if (!*tab) {
+        pos = lseek(fd, 0, SEEK_CUR);
+        for (off = sizeof ARMAG - 1;;) {
+            len = read_ar_header(fd, off, &h);
+            if (len <= 0)
+                break;
+            size = strtol(h.ar_size, NULL, 0);
+            if (!strcmp(h.ar_name, "//")) {
+                *tab = tcc_malloc(size + 1);
+                if (full_read(fd, *tab, size) != size)
+                    size = 0;
+                (*tab)[size] = 0;
+                *tabsize = size;
+                break;
+            }
+            if (h.ar_name[0] != '/') /* the table precedes the members */
+                break;
+            off = (off + len + size + 1) & ~1;
+        }
+        lseek(fd, pos, SEEK_SET);
+        if (!*tab)
+            return name;
+    }
+    off = atoi(name + 1);
+    if (off >= *tabsize)
+        return name;
+    for (p = name = *tab + off; *p && *p != '/' && *p != '\n';)
+        ++p;
+    *p = 0;
+    return name;
+}
+
 /* load only the objects which resolve undefined symbols */
 static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
 {
@@ -3672,6 +3721,8 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
     const uint8_t *ar_index;
     ElfW(Sym) *sym;
     ArchiveHeader hdr;
+    char *ar_longnames = NULL;
+    int ar_longnames_size = 0;
 
     data = tcc_malloc(size);
     if (full_read(fd, data, size) != size)
@@ -3699,7 +3750,8 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
             }
             off += len;
             if (s1->verbose == 2)
-                printf("   -> %s\n", hdr.ar_name);
+                printf("   -> %s\n", ar_member_name(fd, &hdr,
+                        &ar_longnames, &ar_longnames_size));
             if (tcc_load_member(s1, fd, off, 0) < 0)
                 goto the_end;
             ++bound;
@@ -3707,6 +3759,7 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
     } while(bound);
     ret = 0;
  the_end:
+    tcc_free(ar_longnames);
     tcc_free(data);
     return ret;
 }
@@ -3716,9 +3769,11 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
 {
     ArchiveHeader hdr;
     /* char magic[8]; */
-    int size, len;
+    int size, len, ret = 0;
     unsigned long file_offset;
     ElfW(Ehdr) ehdr;
+    char *ar_longnames = NULL;
+    int ar_longnames_size = 0;
 
     /* skip magic which was already checked */
     /* full_read(fd, magic, sizeof(magic)); */
@@ -3727,29 +3782,40 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
     for(;;) {
         len = read_ar_header(fd, file_offset, &hdr);
         if (len == 0)
-            return 0;
-        if (len < 0)
-            return tcc_error_noabort("invalid archive");
+            break;
+        if (len < 0) {
+            ret = tcc_error_noabort("invalid archive");
+            break;
+        }
         file_offset += len;
         size = strtol(hdr.ar_size, NULL, 0);
         if (alacarte) {
             /* coff symbol table : we handle it */
-            if (!strcmp(hdr.ar_name, "/"))
-                return tcc_load_alacarte(s1, fd, size, 4);
-            if (!strcmp(hdr.ar_name, "/SYM64/"))
-                return tcc_load_alacarte(s1, fd, size, 8);
+            if (!strcmp(hdr.ar_name, "/")) {
+                ret = tcc_load_alacarte(s1, fd, size, 4);
+                break;
+            }
+            if (!strcmp(hdr.ar_name, "/SYM64/")) {
+                ret = tcc_load_alacarte(s1, fd, size, 8);
+                break;
+            }
         } else {
             int t = tcc_object_type(fd, &ehdr);
             if (t == AFF_BINTYPE_REL || t == AFF_BINTYPE_COFF) {
                 if (s1->verbose == 2)
-                    printf("   -> %s\n", hdr.ar_name);
-                if (tcc_load_member(s1, fd, file_offset, t) < 0)
-                    return -1;
+                    printf("   -> %s\n", ar_member_name(fd, &hdr,
+                            &ar_longnames, &ar_longnames_size));
+                if (tcc_load_member(s1, fd, file_offset, t) < 0) {
+                    ret = -1;
+                    break;
+                }
             }
         }
         /* align to even */
         file_offset = (file_offset + size + 1) & ~1;
     }
+    tcc_free(ar_longnames);
+    return ret;
 }
 
 #ifndef ELF_OBJ_ONLY
