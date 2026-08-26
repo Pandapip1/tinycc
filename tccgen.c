@@ -5864,6 +5864,35 @@ ST_FUNC void unary(void)
         vpush(&type);
         CODE_OFF();
         break;
+    case TOK_builtin_eh_return_data_regno:
+        /* Map an exception-handling data register index to the DWARF
+           register number that _Unwind_SetGR() expects, exactly as gcc's
+           EH_RETURN_DATA_REGNO()/DWARF_FRAME_REGNUM() pair does.  Like
+           gcc this folds to a constant at compile time and yields -1 for
+           an index the target has no EH data register for.  */
+        {
+            int idx;
+            next();
+            skip('(');
+            idx = expr_const();
+            skip(')');
+#if defined TCC_TARGET_I386
+            /* %eax, %edx (dwarf regnos 0 and 2) */
+            n = idx == 0 ? 0 : idx == 1 ? 2 : -1;
+#elif defined TCC_TARGET_X86_64
+            /* %rax, %rdx (dwarf regnos 0 and 1) */
+            n = idx == 0 ? 0 : idx == 1 ? 1 : -1;
+#elif defined TCC_TARGET_ARM
+            /* r0, r1 (dwarf regnos 0 and 1) */
+            n = idx == 0 ? 0 : idx == 1 ? 1 : -1;
+#else
+            n = -1;
+            tcc_error("__builtin_eh_return_data_regno is not supported"
+                      " on this target");
+#endif
+            vpushi(n);
+        }
+        break;
     case TOK_builtin_frame_address:
     case TOK_builtin_return_address:
         {
