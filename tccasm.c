@@ -968,6 +968,22 @@ static void asm_parse_directive(TCCState *s1, int global)
             next();
         }
         break;
+    case TOK_ASMDIR_def:
+        /* '.def name; .scl N; .type N; .endef' is the COFF symbol-table
+           annotation that gcc emits for every function when it targets PE
+           (GAS docs, node "Def").  It records a storage class and a COFF
+           type; TCC's PE writer derives both from the ELF symbol instead
+           (tccpe.c, pe_putimport()/symbol output), so the whole block is
+           skipped.  It has to be skipped as a block rather than a line:
+           the '.type' inside it is the COFF one, an integer, unrelated to
+           the ELF '.type sym,@function' directive TCC implements. */
+        while (tok != TOK_ASMDIR_endef && tok != TOK_EOF)
+            next();
+        /* fall through to consume the '.endef' itself */
+    case TOK_ASMDIR_endef:
+        if (tok != TOK_EOF)
+            next();
+        break;
     case TOK_ASMDIR_linkonce:
         /* '.linkonce [discard|one_only|same_size|same_contents]' marks the
            current section link-once, i.e. a COMDAT: the linker keeps a

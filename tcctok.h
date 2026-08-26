@@ -395,6 +395,8 @@
  DEF_ASMDIR(global)
  DEF_ASMDIR(weak)
  DEF_ASMDIR(linkonce)
+ DEF_ASMDIR(def)
+ DEF_ASMDIR(endef)
  DEF_ASMDIR(hidden)
  DEF_ASMDIR(ident)
  DEF_ASMDIR(size)

@@ -243,4 +243,22 @@ __asm__(".section .rodata.lo1$x,\"a\",@progbits\n"
 extern const unsigned lo_a, lo_b, lo_c;
 int main(void) { printf("%x %x %x\n", lo_a, lo_b, lo_c); return 0; }
 
+#elif defined test_def_endef
+
+/* '.def name; .scl N; .type N; .endef' is the COFF symbol annotation gcc
+   emits for every function when it targets PE (GAS docs, node "Def").
+   TCC skips the whole block; note that the '.type' inside it is the COFF
+   one, an integer, so it cannot be parsed as the ELF '.type' directive. */
+__asm__(".text\n"
+        ".globl dfn\n"
+        ".def dfn;  .scl 2;  .type 32;  .endef\n"
+        "dfn:\n"
+#if defined __x86_64__ || defined __i386__
+        "  ret\n"
+#endif
+        ".def dfn2;\t.scl\t3;\t.type\t32;\t.endef\n"
+        ".text\n");
+extern void dfn(void);
+int main(void) { dfn(); printf("def-ok\n"); return 0; }
+
 #endif
